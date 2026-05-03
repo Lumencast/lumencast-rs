@@ -71,6 +71,7 @@ fn server_error() {
         message: "viewer cannot send input".into(),
         recoverable: true,
         retry_after_ms: None,
+        path: None,
         ts: None,
     }));
 }
@@ -121,6 +122,7 @@ fn error_code_wire_string() {
         message: "x".into(),
         recoverable: false,
         retry_after_ms: None,
+        path: None,
         ts: None,
     }))
     .unwrap();

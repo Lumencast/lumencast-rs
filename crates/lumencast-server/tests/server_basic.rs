@@ -248,6 +248,191 @@ async fn viewer_input_is_rejected() {
 }
 
 #[tokio::test]
+async fn declared_inputs_unknown_path_rejected() {
+    use lumencast_server::{InputSpec, InputType};
+
+    let (srv, addr, _auth) = start_server().await;
+    let scene = srv.new_scene("main").unwrap();
+    let _ = scene.clone().with_operator_inputs(vec![
+        InputSpec::new(LeafPath::from("__inputs.title"))
+            .kind(InputType::String)
+            .max_length(80),
+    ]);
+
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        srv.run_with_shutdown(async {
+            let _ = stop_rx.await;
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut ws = connect(addr).await;
+    send_client(
+        &mut ws,
+        &ClientFrame::Subscribe(Subscribe {
+            token: Token::from("op"),
+            scene: None,
+            session: None,
+        }),
+    )
+    .await;
+    let _ = recv_server(&mut ws).await; // snapshot
+
+    // Path not in declared set.
+    send_client(
+        &mut ws,
+        &ClientFrame::Input(Input {
+            patches: vec![Patch::new(
+                LeafPath::from("__inputs.does_not_exist"),
+                json!("x"),
+            )],
+        }),
+    )
+    .await;
+    match recv_server(&mut ws).await {
+        ServerFrame::Error(e) => {
+            assert_eq!(e.code, ErrorCode::UnknownPath);
+            assert_eq!(e.path.as_deref(), Some("__inputs.does_not_exist"));
+            assert!(e.recoverable);
+        }
+        other => panic!("expected UNKNOWN_PATH, got {other:?}"),
+    }
+
+    drop(ws);
+    let _ = stop_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
+}
+
+async fn expect_invalid_value(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    path: &str,
+) {
+    match recv_server(ws).await {
+        ServerFrame::Error(e) => {
+            assert_eq!(e.code, ErrorCode::InvalidValue);
+            assert_eq!(e.path.as_deref(), Some(path));
+            assert!(e.recoverable);
+        }
+        other => panic!("expected INVALID_VALUE for {path}, got {other:?}"),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn declared_inputs_invalid_value_rejected() {
+    use lumencast_server::{InputSpec, InputType};
+
+    let (srv, addr, _auth) = start_server().await;
+    let scene = srv.new_scene("main").unwrap();
+    let _ = scene.clone().with_operator_inputs(vec![
+        InputSpec::new(LeafPath::from("__inputs.title"))
+            .kind(InputType::String)
+            .max_length(5),
+        InputSpec::new(LeafPath::from("__inputs.theme"))
+            .kind(InputType::Enum)
+            .values(["dark", "light"]),
+        InputSpec::new(LeafPath::from("__inputs.score"))
+            .kind(InputType::Number)
+            .min(0.0)
+            .max(100.0),
+    ]);
+
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        srv.run_with_shutdown(async {
+            let _ = stop_rx.await;
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut ws = connect(addr).await;
+    send_client(
+        &mut ws,
+        &ClientFrame::Subscribe(Subscribe {
+            token: Token::from("op"),
+            scene: None,
+            session: None,
+        }),
+    )
+    .await;
+    let _ = recv_server(&mut ws).await; // snapshot
+
+    // String too long.
+    send_client(
+        &mut ws,
+        &ClientFrame::Input(Input {
+            patches: vec![Patch::new(
+                LeafPath::from("__inputs.title"),
+                json!("way too long"),
+            )],
+        }),
+    )
+    .await;
+    expect_invalid_value(&mut ws, "__inputs.title").await;
+
+    // Enum miss.
+    send_client(
+        &mut ws,
+        &ClientFrame::Input(Input {
+            patches: vec![Patch::new(
+                LeafPath::from("__inputs.theme"),
+                json!("rainbow"),
+            )],
+        }),
+    )
+    .await;
+    expect_invalid_value(&mut ws, "__inputs.theme").await;
+
+    // Number above max.
+    send_client(
+        &mut ws,
+        &ClientFrame::Input(Input {
+            patches: vec![Patch::new(LeafPath::from("__inputs.score"), json!(999))],
+        }),
+    )
+    .await;
+    expect_invalid_value(&mut ws, "__inputs.score").await;
+
+    // Atomic: one good + one bad → entire frame rejected, no delta.
+    send_client(
+        &mut ws,
+        &ClientFrame::Input(Input {
+            patches: vec![
+                Patch::new(LeafPath::from("__inputs.title"), json!("ok")),
+                Patch::new(LeafPath::from("__inputs.score"), json!(-1)),
+            ],
+        }),
+    )
+    .await;
+    expect_invalid_value(&mut ws, "__inputs.score").await;
+
+    // After rejection, valid input still goes through.
+    send_client(
+        &mut ws,
+        &ClientFrame::Input(Input {
+            patches: vec![Patch::new(LeafPath::from("__inputs.title"), json!("hi"))],
+        }),
+    )
+    .await;
+    match recv_server(&mut ws).await {
+        ServerFrame::Delta(d) => {
+            assert_eq!(d.patches.len(), 1);
+            assert_eq!(d.patches[0].value, json!("hi"));
+        }
+        other => panic!("expected delta after recovery, got {other:?}"),
+    }
+
+    drop(ws);
+    let _ = stop_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
+}
+
+#[tokio::test]
 async fn auth_denied_closes() {
     let (srv, addr, _auth) = start_server().await;
     let _scene = srv.new_scene("main").unwrap();

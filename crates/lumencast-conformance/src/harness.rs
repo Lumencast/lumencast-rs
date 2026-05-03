@@ -62,7 +62,13 @@ pub struct Outcome {
     pub name: String,
     /// Whether the scenario passed.
     pub passed: bool,
-    /// Free-form failure description, if any.
+    /// Whether the scenario was skipped (target mismatch, tag filter,
+    /// unsupported step kind in a runtime-only path). When `true`, the
+    /// scenario doesn't count toward the FAIL bucket — exit codes and
+    /// matrix reports treat it as N/A.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+    /// Free-form failure / skip description.
     pub message: Option<String>,
 }
 
@@ -73,15 +79,20 @@ pub struct Report {
     pub total: usize,
     /// How many passed.
     pub passed: usize,
+    /// How many were skipped (auto-skip, tag filter, etc.).
+    #[serde(default)]
+    pub skipped: usize,
     /// Per-scenario outcomes, ordered by execution.
     pub outcomes: Vec<Outcome>,
 }
 
 impl Report {
-    /// Returns `true` if every scenario passed.
+    /// Returns `true` if every non-skipped scenario passed. Skipped
+    /// scenarios (auto-skip on target mismatch, etc.) don't count
+    /// against success — they're N/A, not failures.
     #[must_use]
     pub fn all_passed(&self) -> bool {
-        self.passed == self.total
+        self.passed + self.skipped == self.total
     }
 }
 
@@ -96,13 +107,27 @@ pub async fn run(config: Config) -> Result<Report, HarnessError> {
     let mut passed = 0;
     let total = scenarios.len();
 
+    let mut skipped = 0usize;
     for scenario in scenarios {
+        // Auto-skip runtime-target scenarios — this harness drives a
+        // server, not a runtime. Mirrors the Go SDK behaviour.
+        if matches!(scenario.target, crate::scenario::Target::Runtime) {
+            skipped += 1;
+            outcomes.push(Outcome {
+                name: scenario.name.clone(),
+                passed: false,
+                skipped: true,
+                message: Some("runtime-targeted scenario, harness drives a server".to_string()),
+            });
+            continue;
+        }
         match run_scenario(&scenario, &control, &config.tokens).await {
             Ok(()) => {
                 passed += 1;
                 outcomes.push(Outcome {
                     name: scenario.name.clone(),
                     passed: true,
+                    skipped: false,
                     message: None,
                 });
             }
@@ -112,6 +137,7 @@ pub async fn run(config: Config) -> Result<Report, HarnessError> {
                 outcomes.push(Outcome {
                     name: scenario.name.clone(),
                     passed: false,
+                    skipped: false,
                     message: Some(e.to_string()),
                 });
             }
@@ -121,6 +147,7 @@ pub async fn run(config: Config) -> Result<Report, HarnessError> {
     Ok(Report {
         total,
         passed,
+        skipped,
         outcomes,
     })
 }

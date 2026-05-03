@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::auth::{Identity, MapAuthenticator};
+use crate::input::{InputSpec, InputType};
 use crate::role::Role;
 use crate::server::ServerHandle;
 use lumencast_protocol::types::{SceneId, SceneVersion};
@@ -143,8 +144,15 @@ async fn handle_setup(
         );
     }
 
+    // `inline.scene_id` may override `bundle.id` per the Go reference
+    // (`extractInputSpecs`). When absent, fall back to the wrapper id.
+    let inline = bundle.inline.as_ref();
+    let effective_id: String = inline
+        .and_then(|v| v.get("scene_id").and_then(Value::as_str))
+        .map_or_else(|| bundle.id.clone(), str::to_string);
+
     let scene = match state.server.new_scene_with_version(
-        SceneId::from(bundle.id.as_str()),
+        SceneId::from(effective_id.as_str()),
         SceneVersion::from(bundle.hash.clone()),
     ) {
         Ok(s) => s,
@@ -157,32 +165,109 @@ async fn handle_setup(
         }
     };
 
+    // Operator-input declarations: extract from `inline.operator_inputs`
+    // and attach to the scene. Mirrors Go's `extractInputSpecs`.
+    let mut applied_inputs = 0usize;
+    if let Some(specs) = inline.and_then(extract_input_specs) {
+        applied_inputs = specs.len();
+        // `with_operator_inputs` consumes/returns the scene by value;
+        // we only need the side-effect on the shared inner state via
+        // its internal RwLock.
+        let _kept = scene.clone().with_operator_inputs(specs);
+    }
+
+    // Seed: prefer `initial_state`; fall back to `inline.defaults`.
     if !req.initial_state.is_empty() {
         scene.seed(
             req.initial_state
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
+    } else if let Some(defaults) = inline.and_then(|v| v.get("defaults").and_then(Value::as_object))
+    {
+        scene.seed(defaults.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 
     let _ = state
         .server
-        .set_active_scene(SceneId::from(bundle.id.as_str()));
+        .set_active_scene(SceneId::from(effective_id.as_str()));
 
     tracing::info!(
         scenario = req.scenario.as_deref().unwrap_or("<unnamed>"),
-        scene_id = %bundle.id,
+        scene_id = %effective_id,
         scene_version = %bundle.hash,
         token_count = req.tokens.len(),
+        operator_inputs = applied_inputs,
         "control-plane setup"
     );
 
     let body = SetupResponse {
         ws_url: state.ws_url.clone(),
-        scene_id: bundle.id.clone(),
+        scene_id: effective_id,
         scene_version: bundle.hash.clone(),
     };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Mirror of Go's `extractInputSpecs`: read the `inline.operator_inputs`
+/// array (LSML 1.0 §8 shape) and return a `Vec<InputSpec>`. Skips
+/// malformed entries silently — the Go server does the same.
+///
+/// LSML 1.0 §8 nests constraints under a `constraints` object :
+///
+/// ```yaml
+/// operator_inputs:
+///   - path: "__inputs.title"
+///     type: string
+///     constraints: { maxLength: 5 }
+/// ```
+///
+/// The Rust `InputSpec` keeps the constraints flat for ergonomics, so
+/// we parse the `path` / `type` fields directly and project
+/// `constraints.maxLength` / `min` / `max` / `values` onto the spec.
+fn extract_input_specs(inline: &Value) -> Option<Vec<InputSpec>> {
+    let arr = inline.get("operator_inputs")?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let Some(path) = obj.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut spec = InputSpec::new(path);
+        if let Some(kind_str) = obj.get("type").and_then(Value::as_str)
+            && let Ok(kind) = serde_json::from_value::<InputType>(Value::String(kind_str.into()))
+        {
+            spec = spec.kind(kind);
+        }
+        if let Some(constraints) = obj.get("constraints").and_then(Value::as_object) {
+            if let Some(max) = constraints.get("maxLength").and_then(Value::as_u64)
+                && let Ok(max) = u32::try_from(max)
+            {
+                spec = spec.max_length(max);
+            }
+            if let Some(min) = constraints.get("min").and_then(Value::as_f64) {
+                spec = spec.min(min);
+            }
+            if let Some(max) = constraints.get("max").and_then(Value::as_f64) {
+                spec = spec.max(max);
+            }
+            if let Some(values) = constraints.get("values").and_then(Value::as_array) {
+                let mut vs = Vec::with_capacity(values.len());
+                for v in values {
+                    if let Some(s) = v.as_str() {
+                        vs.push(s.to_string());
+                    }
+                }
+                if !vs.is_empty() {
+                    spec = spec.values(vs);
+                }
+            }
+        }
+        out.push(spec);
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn install_tokens(auth: &MapAuthenticator, tokens: &BTreeMap<String, String>) {

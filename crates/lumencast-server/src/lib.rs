@@ -47,6 +47,7 @@ mod auth;
 mod bundle_route;
 mod config;
 mod error;
+mod input;
 mod role;
 mod scene;
 mod server;
@@ -60,8 +61,9 @@ mod ws_handler;
 pub use auth::{AuthError, Authenticator, Identity, MapAuthenticator};
 pub use config::ServerConfig;
 pub use error::ServerError;
+pub use input::{InputSpec, InputType, check_constraint};
 pub use role::Role;
-pub use scene::Scene;
+pub use scene::{InputRejection, Scene};
 pub use server::{Server, ServerBuilder, ServerHandle};
 
 #[cfg(feature = "tls")]

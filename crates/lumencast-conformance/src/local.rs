@@ -47,6 +47,7 @@ pub fn server_fixtures() -> Vec<ServerFrame> {
             message: "viewer cannot write".into(),
             recoverable: true,
             retry_after_ms: None,
+            path: None,
             ts: None,
         }),
         ServerFrame::Pong,

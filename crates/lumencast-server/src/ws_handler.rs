@@ -303,17 +303,41 @@ impl Connection {
         }
 
         // Atomic validation: if any patch is illegal, reject the whole
-        // frame (LSDP/1 §4.2).
+        // frame (LSDP/1 §4.2). Order: role → declared-inputs →
+        // value-shape. Stops at the first failure and emits an error
+        // frame with the offending `path` populated for UNKNOWN_PATH
+        // / INVALID_VALUE / WRITE_FORBIDDEN.
         for p in &input.patches {
             if !identity.role.can_write(&p.path, identity.paths.as_deref()) {
                 let msg = format!("path {} not writable by role {}", p.path, identity.role);
-                self.send_error(ErrorCode::WriteForbidden, msg, true)
-                    .await?;
+                self.send_error_with_path(
+                    ErrorCode::WriteForbidden,
+                    msg,
+                    true,
+                    Some(p.path.as_str().to_string()),
+                )
+                .await?;
+                return Ok(());
+            }
+            if let Err(rejection) = scene.check_input_patch(p) {
+                self.send_error_with_path(
+                    rejection.code,
+                    rejection.message,
+                    true,
+                    Some(rejection.path),
+                )
+                .await?;
                 return Ok(());
             }
             if !p.is_value_legal() {
                 let msg = format!("path {} value MUST NOT be a JSON object", p.path);
-                self.send_error(ErrorCode::InvalidValue, msg, true).await?;
+                self.send_error_with_path(
+                    ErrorCode::InvalidValue,
+                    msg,
+                    true,
+                    Some(p.path.as_str().to_string()),
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -370,6 +394,17 @@ impl Connection {
         message: impl Into<String>,
         recoverable: bool,
     ) -> Result<(), HandlerError> {
+        self.send_error_with_path(code, message, recoverable, None)
+            .await
+    }
+
+    async fn send_error_with_path(
+        &mut self,
+        code: ErrorCode,
+        message: impl Into<String>,
+        recoverable: bool,
+        path: Option<String>,
+    ) -> Result<(), HandlerError> {
         let seq = self.seq.next();
         let frame = ServerFrame::Error(ErrorFrame {
             seq,
@@ -377,6 +412,7 @@ impl Connection {
             message: message.into(),
             recoverable,
             retry_after_ms: None,
+            path,
             ts: Some(now_iso()),
         });
         self.send(&frame).await

@@ -15,7 +15,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::control::{ControlClient, SetupBundle, SetupRequest};
 use crate::placeholders::{Substitutions, hash_inline_bundle};
-use crate::scenario::{ClientAction, Scenario, Step};
+use crate::scenario::{Scenario, Step};
 
 /// Failure raised while running a scenario.
 #[derive(Debug, thiserror::Error)]
@@ -50,23 +50,22 @@ pub async fn run_scenario(
     // 2. Substitutions.
     let subs = Substitutions::new(tokens, &bundle_hashes);
 
-    // 3. /test/setup.
+    // 3. /test/setup. Mirrors the Go SDK's HTTPDriver.bundlesFor :
+    // when scenarios declare bundles use them (with inline.scene_id
+    // overriding bundle.id), otherwise synthesise a minimal bundle
+    // from the first server-sends snapshot. Same for initial_state —
+    // either declared or extracted from the first snapshot.
+    let bundles = build_setup_bundles(scenario, &bundle_hashes);
+    let initial_state = if scenario.initial_state.is_empty() {
+        extract_initial_state(scenario)
+    } else {
+        scenario.initial_state.clone()
+    };
     let setup = SetupRequest {
         scenario: scenario.name.clone(),
         tokens: tokens.clone(),
-        bundles: scenario
-            .bundles
-            .iter()
-            .map(|b| SetupBundle {
-                id: b.id.clone(),
-                hash: bundle_hashes
-                    .get(&b.id)
-                    .cloned()
-                    .unwrap_or_else(|| "sha256:".to_string()),
-                inline: Some(b.inline.clone()),
-            })
-            .collect(),
-        initial_state: scenario.initial_state.clone(),
+        bundles,
+        initial_state,
     };
     let setup_resp = control.setup(&setup).await?;
 
@@ -190,14 +189,22 @@ async fn run_step(
                 });
             }
         }
-        Step::ExpectClientAction(action) => match action {
-            ClientAction::CloseWithReason { reason } => {
-                let resolved = subs.apply(&Value::String(reason.clone()));
+        Step::ExpectClientAction(action) => match action.action.as_str() {
+            "close-with-reason" => {
+                let reason = action
+                    .fields
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let resolved = subs.apply(&Value::String(reason.to_string()));
                 let want = resolved.as_str().unwrap_or(reason).to_string();
                 let frame = ws.next().await;
                 match frame {
                     Some(Ok(Message::Close(Some(CloseFrame { reason: got, .. })))) => {
-                        if !got.contains(&want) {
+                        // $ANY accepts any reason — useful for
+                        // scenarios that only assert "closed", not
+                        // "closed with this exact text".
+                        if want != "$ANY" && !got.contains(&want) {
                             return Err(PlayerError::StepFailed {
                                 step_index: idx,
                                 message: format!(
@@ -218,18 +225,87 @@ async fn run_step(
                     None => return Err(PlayerError::Closed),
                 }
             }
-            ClientAction::Reconnect => {
+            "reconnect" => {
                 // Harness can't observe the runtime opening a fresh
                 // connection from outside; this step is a no-op when
                 // the harness IS the client.
             }
+            other => {
+                // Unsupported runtime-target action (fetch-bundle,
+                // onError, ...). Scenarios that need these are
+                // target=runtime and should have been auto-skipped
+                // upstream — if we land here it's a scenario shape
+                // bug.
+                return Err(PlayerError::StepFailed {
+                    step_index: idx,
+                    message: format!(
+                        "expect-client-action: action {other:?} not supported in server-target harness"
+                    ),
+                });
+            }
         },
-        Step::ServerEmits { patches } => {
-            let pairs: Vec<(String, Value)> = patches
-                .iter()
-                .map(|p| (p.path.clone(), subs.apply(&p.value)))
-                .collect();
+        Step::ServerEmits { frame } => {
+            // Extract patches from the expected frame, POST /test/emit,
+            // then read the actual frame and structurally match — same
+            // semantic as `server-sends` but harness-orchestrated.
+            // Currently only `frame.type == "delta"` is supported per
+            // SCENARIO-FORMAT.md § server-emits.
+            let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
+            if frame_type != "delta" {
+                return Err(PlayerError::StepFailed {
+                    step_index: idx,
+                    message: format!(
+                        "server-emits only supports type=delta today, got {frame_type:?}"
+                    ),
+                });
+            }
+            let raw_patches = frame
+                .get("patches")
+                .and_then(Value::as_array)
+                .ok_or_else(|| PlayerError::StepFailed {
+                    step_index: idx,
+                    message: "server-emits delta missing `patches` list".into(),
+                })?;
+            let mut pairs: Vec<(String, Value)> = Vec::with_capacity(raw_patches.len());
+            for p in raw_patches {
+                let path = p
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| PlayerError::StepFailed {
+                        step_index: idx,
+                        message: "server-emits patch missing `path`".into(),
+                    })?
+                    .to_string();
+                let value = p
+                    .get("value")
+                    .cloned()
+                    .ok_or_else(|| PlayerError::StepFailed {
+                        step_index: idx,
+                        message: "server-emits patch missing `value`".into(),
+                    })?;
+                pairs.push((path, subs.apply(&value)));
+            }
             control.emit(pairs).await?;
+            // Read + match the resulting wire frame.
+            let actual = read_text_frame(ws, idx, Duration::from_secs(5)).await?;
+            update_shadow_from_frame(&actual, shadow_state);
+            let expected = subs.apply(frame);
+            if let Err(diff) = structural_match(&expected, &actual) {
+                return Err(PlayerError::StepFailed {
+                    step_index: idx,
+                    message: format!("server-emits mismatch: {diff} (got {actual})"),
+                });
+            }
+        }
+        Step::Unsupported { kind, .. } => {
+            // We intentionally accept unknown step kinds at parse
+            // time so target=runtime scenarios can be loaded and
+            // skipped. If a server-target scenario reaches one of
+            // these, surface it as a clear runtime error.
+            return Err(PlayerError::StepFailed {
+                step_index: idx,
+                message: format!("step kind {kind:?} not supported by server-target harness"),
+            });
         }
     }
     Ok(())
@@ -285,7 +361,26 @@ fn update_shadow_from_frame(frame: &Value, shadow: &mut BTreeMap<String, Value>)
 /// Structural match: every key in `expected` must be present in
 /// `actual` with the same value (recursively for objects). `actual`
 /// MAY have extra keys.
+///
+/// Sentinels in the expected template :
+/// - `$ANY` — matches any value of any type
+/// - `$ANY_HASH` — matches any sha256:<hex64> string
 fn structural_match(expected: &Value, actual: &Value) -> Result<(), String> {
+    if let Some(s) = expected.as_str() {
+        match s {
+            "$ANY" => return Ok(()),
+            "$ANY_HASH" => {
+                let actual_str = actual
+                    .as_str()
+                    .ok_or_else(|| format!("$ANY_HASH expects a string, got {actual}"))?;
+                if !is_sha256_hash(actual_str) {
+                    return Err(format!("$ANY_HASH does not match {actual_str:?}"));
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     match (expected, actual) {
         (Value::Object(e), Value::Object(a)) => {
             for (k, ev) in e {
@@ -310,6 +405,14 @@ fn structural_match(expected: &Value, actual: &Value) -> Result<(), String> {
     }
 }
 
+/// Lightweight sha256 hash check : prefix `sha256:` + 64 hex chars.
+fn is_sha256_hash(s: &str) -> bool {
+    let Some(hex) = s.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 impl Substitutions {
     /// Apply substitutions to every value of a `String → Value` map.
     fn apply_to_map(&self, map: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
@@ -317,4 +420,130 @@ impl Substitutions {
             .map(|(k, v)| (k.clone(), self.apply(v)))
             .collect()
     }
+}
+
+/// Mirror of Go's `HTTPDriver.bundlesFor` : pick the right (id, hash,
+/// inline) for `/test/setup`, synthesising a minimal bundle when the
+/// scenario doesn't declare one.
+fn build_setup_bundles(
+    scenario: &Scenario,
+    bundle_hashes: &BTreeMap<String, String>,
+) -> Vec<SetupBundle> {
+    if !scenario.bundles.is_empty() {
+        return scenario
+            .bundles
+            .iter()
+            .map(|b| {
+                // inline.scene_id wins over bundle.id — the bundle's id
+                // is the scenario-local reference name, the LSML's
+                // scene_id is the server-side scene identifier. Without
+                // this, scenarios that expect a specific scene_id (e.g.
+                // "t") get rejected when their bundle's wrapper id is
+                // different (e.g. "title-bundle").
+                let id = b
+                    .inline
+                    .get("scene_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&b.id)
+                    .to_string();
+                SetupBundle {
+                    id,
+                    hash: bundle_hashes
+                        .get(&b.id)
+                        .cloned()
+                        .unwrap_or_else(|| "sha256:".to_string()),
+                    inline: Some(b.inline.clone()),
+                }
+            })
+            .collect();
+    }
+
+    // Synthetic bundle for scenarios with no explicit declaration.
+    let (id, hash) = first_scene_id_and_hash(scenario);
+    let id = if id.is_empty() {
+        scenario.name.clone()
+    } else {
+        id
+    };
+    let hash = if hash.is_empty() {
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string()
+    } else {
+        hash
+    };
+    // Synthesise operator_inputs from the snapshot's __inputs.* state
+    // keys so the server enforces path declaredness.
+    let initial_state = extract_initial_state(scenario);
+    let mut inline = serde_json::Map::new();
+    let mut inputs = Vec::new();
+    for path in initial_state.keys() {
+        if path.starts_with("__inputs.") {
+            inputs.push(serde_json::json!({"path": path}));
+        }
+    }
+    if !inputs.is_empty() {
+        inline.insert("operator_inputs".into(), Value::Array(inputs));
+    }
+
+    vec![SetupBundle {
+        id,
+        hash,
+        inline: Some(Value::Object(inline)),
+    }]
+}
+
+/// Mirror of Go's `firstSceneIDAndHash` : scan server-sends steps for
+/// a literal `scene_id` + `scene_version`. Empty strings if not found
+/// (which means the harness will fall back to placeholder defaults).
+fn first_scene_id_and_hash(scenario: &Scenario) -> (String, String) {
+    let mut id = String::new();
+    let mut hash = String::new();
+    for step in &scenario.steps {
+        let Step::ServerSends { frame } = step else {
+            continue;
+        };
+        if id.is_empty()
+            && let Some(v) = frame.get("scene_id").and_then(Value::as_str)
+            && v != "$ANY"
+        {
+            id = v.to_string();
+        }
+        if hash.is_empty()
+            && let Some(v) = frame.get("scene_version").and_then(Value::as_str)
+            && v != "$ANY_HASH"
+        {
+            hash = v.to_string();
+        }
+        if !id.is_empty() && !hash.is_empty() {
+            break;
+        }
+    }
+    (id, hash)
+}
+
+/// Mirror of Go's `extractInitialState` : pull state from the first
+/// server-sends snapshot, dropping `$ANY*` sentinels which cannot be
+/// seeded literally.
+fn extract_initial_state(scenario: &Scenario) -> BTreeMap<String, Value> {
+    for step in &scenario.steps {
+        let Step::ServerSends { frame } = step else {
+            continue;
+        };
+        if frame.get("type").and_then(Value::as_str) != Some("snapshot") {
+            continue;
+        }
+        let Some(state) = frame.get("state").and_then(Value::as_object) else {
+            continue;
+        };
+        let mut out = BTreeMap::new();
+        for (k, v) in state {
+            if let Some(s) = v.as_str()
+                && (s == "$ANY" || s == "$ANY_HASH")
+            {
+                continue;
+            }
+            out.insert(k.clone(), v.clone());
+        }
+        return out;
+    }
+    BTreeMap::new()
 }

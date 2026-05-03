@@ -1,16 +1,18 @@
 //! [`Scene`] — addressable leaf-grain state container with broadcast
 //! fan-out of patches to subscribers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use lumencast_protocol::frames::State;
 use lumencast_protocol::types::{Patch, SceneId, SceneVersion};
-use lumencast_protocol::{LeafPath, types::check_leaf_value};
+use lumencast_protocol::{ErrorCode, LeafPath, types::check_leaf_value};
 use parking_lot::RwLock;
 use serde_json::Value;
 use tokio::sync::broadcast;
 
 use crate::error::ServerError;
+use crate::input::{InputSpec, check_constraint};
 use crate::store::Store;
 
 /// Capacity of the per-scene broadcast channel. Old patches are
@@ -36,6 +38,12 @@ pub(crate) struct SceneInner {
     /// Canonical bytes of the LSML bundle backing this scene (set when
     /// the scene is registered via [`crate::ServerHandle::register_bundle`]).
     bundle_bytes: RwLock<Option<Arc<Vec<u8>>>>,
+    /// Declared `operator_inputs` for this scene. `None` means
+    /// permissive — every patch is accepted (subject to role/value
+    /// checks elsewhere). `Some(_)` enables strict enforcement: any
+    /// path not in the map yields `UNKNOWN_PATH`, any value violating
+    /// the spec's constraints yields `INVALID_VALUE`.
+    declared_inputs: RwLock<Option<HashMap<String, InputSpec>>>,
 }
 
 impl Scene {
@@ -48,6 +56,7 @@ impl Scene {
                 store: Store::new(),
                 tx,
                 bundle_bytes: RwLock::new(None),
+                declared_inputs: RwLock::new(None),
             }),
         }
     }
@@ -136,4 +145,77 @@ impl Scene {
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<[Patch]>> {
         self.inner.tx.subscribe()
     }
+
+    /// Declare the full set of `operator_inputs` for this scene.
+    ///
+    /// Switches the scene from permissive (the default) to strict
+    /// validation: subsequent `input` frames whose patch path isn't
+    /// in `specs` yield an `UNKNOWN_PATH` error frame, and per-spec
+    /// constraint violations yield `INVALID_VALUE`. Replaces any
+    /// previously declared set.
+    #[must_use]
+    pub fn with_operator_inputs(self, specs: Vec<InputSpec>) -> Self {
+        let map: HashMap<String, InputSpec> = specs
+            .into_iter()
+            .map(|spec| (spec.path.as_str().to_string(), spec))
+            .collect();
+        *self.inner.declared_inputs.write() = Some(map);
+        self
+    }
+
+    /// Shorthand for [`Scene::with_operator_inputs`] when only path
+    /// declaredness matters (no per-spec constraints).
+    #[must_use]
+    pub fn with_declared_inputs(self, paths: Vec<LeafPath>) -> Self {
+        let specs: Vec<InputSpec> = paths.into_iter().map(InputSpec::new).collect();
+        self.with_operator_inputs(specs)
+    }
+
+    /// Returns `true` if this scene enforces declared-inputs (strict
+    /// mode). Useful for the WS handler to skip work in permissive
+    /// mode.
+    #[must_use]
+    pub fn enforces_declared_inputs(&self) -> bool {
+        self.inner.declared_inputs.read().is_some()
+    }
+
+    /// Validate one patch against the scene's declared inputs.
+    ///
+    /// Returns `Ok(())` when permissive (no declarations) or when the
+    /// patch matches its spec. Returns `Err(InputRejection { … })`
+    /// otherwise — the WS handler turns this into the corresponding
+    /// `error` frame.
+    pub fn check_input_patch(&self, patch: &Patch) -> Result<(), InputRejection> {
+        let guard = self.inner.declared_inputs.read();
+        let Some(declared) = guard.as_ref() else {
+            return Ok(());
+        };
+        let Some(spec) = declared.get(patch.path.as_str()) else {
+            return Err(InputRejection {
+                code: ErrorCode::UnknownPath,
+                message: format!("path {:?} not declared in operator_inputs", patch.path),
+                path: patch.path.as_str().to_string(),
+            });
+        };
+        if let Some(message) = check_constraint(spec, &patch.value) {
+            return Err(InputRejection {
+                code: ErrorCode::InvalidValue,
+                message,
+                path: patch.path.as_str().to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Reason a patch was rejected by [`Scene::check_input_patch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputRejection {
+    /// LSDP/1 error code (`UNKNOWN_PATH` or `INVALID_VALUE`).
+    pub code: ErrorCode,
+    /// Human-readable description.
+    pub message: String,
+    /// Offending leaf path. Echoed back in the `error` frame's `path`
+    /// field so the harness can localise authoring mistakes.
+    pub path: String,
 }
