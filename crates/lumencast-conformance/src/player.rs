@@ -179,14 +179,37 @@ async fn run_step(
             }
         }
         Step::ExpectNoFrameFor { duration_ms } => {
+            // SCENARIO-FORMAT.md `expect-no-frame-for` § Connection-close
+            // semantics : a clean server-initiated close (codes 1000 /
+            // 1001 / 1005) within the duration is success — the
+            // conceptual contract is "no data flowed". Abnormal closures
+            // remain failures.
             let result = tokio::time::timeout(Duration::from_millis(*duration_ms), ws.next()).await;
-            if result.is_ok() {
-                return Err(PlayerError::StepFailed {
-                    step_index: idx,
-                    message: format!(
-                        "expect-no-frame-for: a frame arrived within {duration_ms} ms"
-                    ),
-                });
+            match result {
+                // Timeout, or stream ended without a close frame — both
+                // count as success (no data flowed).
+                Err(_) | Ok(None) => {}
+                Ok(Some(Ok(Message::Close(close_frame)))) => {
+                    // RFC-6455 close codes : 1000 NormalClosure,
+                    // 1001 GoingAway, 1005 NoStatus all qualify as clean.
+                    let code = close_frame.as_ref().map_or(1005, |cf| u16::from(cf.code));
+                    if !matches!(code, 1000 | 1001 | 1005) {
+                        return Err(PlayerError::StepFailed {
+                            step_index: idx,
+                            message: format!(
+                                "expect-no-frame-for: abnormal close code {code} within {duration_ms} ms"
+                            ),
+                        });
+                    }
+                }
+                Ok(Some(_)) => {
+                    return Err(PlayerError::StepFailed {
+                        step_index: idx,
+                        message: format!(
+                            "expect-no-frame-for: a frame arrived within {duration_ms} ms"
+                        ),
+                    });
+                }
             }
         }
         Step::ExpectClientAction(action) => match action.action.as_str() {
