@@ -263,10 +263,7 @@ fn check_layout_invariants(root: &Value) -> Result<(), BundleError> {
     Ok(())
 }
 
-fn check_per_kind(
-    kind: &str,
-    obj: &serde_json::Map<String, Value>,
-) -> Result<(), BundleError> {
+fn check_per_kind(kind: &str, obj: &serde_json::Map<String, Value>) -> Result<(), BundleError> {
     match kind {
         "image" if !obj.contains_key("alt") => Err(BundleError::Invalid(
             "`image` primitive MUST declare `alt` (LSML 1.0 §13)".into(),
@@ -310,9 +307,9 @@ fn check_per_kind(
         "repeat" if !obj.contains_key("scope") => {
             Err(BundleError::Invalid("`repeat.scope` is required".into()))
         }
-        "repeat" if !obj.contains_key("template") => Err(BundleError::Invalid(
-            "`repeat.template` is required".into(),
-        )),
+        "repeat" if !obj.contains_key("template") => {
+            Err(BundleError::Invalid("`repeat.template` is required".into()))
+        }
         _ => Ok(()),
     }
 }

@@ -4,10 +4,13 @@
 //! [`Scene`] leaf paths.
 //!
 //! - [`spawn_periodic`] — generic periodic tick.
-//! - [`http_poll`] — JSON HTTP polling, gated by the `adapters-http`
-//!   feature.
-//! - [`websocket_subscribe`] — long-lived JSON WebSocket subscription,
-//!   gated by the `adapters-ws` feature.
+//! - `http_poll` — JSON HTTP polling, gated by the `adapters-http`
+//!   feature. See the [`http_poll`](self::http_poll) module when that
+//!   feature is enabled.
+//! - `websocket_subscribe` — long-lived JSON WebSocket subscription,
+//!   gated by the `adapters-ws` feature. See the
+//!   [`websocket_subscribe`](self::websocket_subscribe) module when
+//!   that feature is enabled.
 
 use std::time::Duration;
 
