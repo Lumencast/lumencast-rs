@@ -237,7 +237,7 @@ fn handle_frame(
         ServerFrame::Error(e) => {
             let _ = events.send(Event::Error(e));
         }
-        ServerFrame::Pong => {}
+        ServerFrame::Pong(_) => {}
     }
     Ok(())
 }

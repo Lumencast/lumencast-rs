@@ -24,7 +24,8 @@ use lumencast_protocol::frames::{
 };
 use lumencast_protocol::types::Patch;
 use lumencast_protocol::{
-    ErrorCode, LumencastError, SceneId, SequenceAllocator, codec, envelope::WEBSOCKET_SUBPROTOCOL,
+    ErrorCode, LumencastError, SceneId, SequenceAllocator, codec,
+    envelope::{WEBSOCKET_SUBPROTOCOL, WEBSOCKET_SUBPROTOCOL_V1_1, WEBSOCKET_SUBPROTOCOLS},
 };
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -42,13 +43,17 @@ pub(crate) async fn ws_route(
     if !has_lsdp_subprotocol(&headers) {
         return (
             StatusCode::UPGRADE_REQUIRED,
-            "expected Sec-WebSocket-Protocol: lsdp.v1",
+            "expected Sec-WebSocket-Protocol: lsdp.v1 or lsdp.v1.1",
         )
             .into_response();
     }
 
+    // LSDP/1.1 preferred, 1.0 fallback. axum's WebSocketUpgrade::protocols
+    // performs RFC-6455 preference negotiation against the client's offered
+    // list — the first server-advertised protocol the client also offered
+    // wins.
     let max = inner.config.max_frame_bytes;
-    ws.protocols([WEBSOCKET_SUBPROTOCOL])
+    ws.protocols(WEBSOCKET_SUBPROTOCOLS.iter().copied())
         .max_message_size(max)
         .max_frame_size(max)
         .on_upgrade(move |socket| async move {
@@ -64,7 +69,10 @@ fn has_lsdp_subprotocol(headers: &HeaderMap) -> bool {
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .any(|p| p.trim() == WEBSOCKET_SUBPROTOCOL)
+        .any(|p| {
+            let trimmed = p.trim();
+            trimmed == WEBSOCKET_SUBPROTOCOL || trimmed == WEBSOCKET_SUBPROTOCOL_V1_1
+        })
 }
 
 async fn handle(socket: WebSocket, inner: Arc<ServerInner>) -> Result<(), HandlerError> {
@@ -261,8 +269,12 @@ impl Connection {
         };
 
         match frame {
-            ClientFrame::Ping => {
-                self.send(&ServerFrame::Pong).await?;
+            ClientFrame::Ping(ping) => {
+                // LSDP/1.1 §3.5 — echo nonce verbatim if present.
+                self.send(&ServerFrame::Pong(lumencast_protocol::frames::Pong {
+                    nonce: ping.nonce.clone(),
+                }))
+                .await?;
             }
             ClientFrame::Subscribe(_) => {
                 self.send_error(ErrorCode::Internal, "duplicate subscribe", false)
@@ -271,6 +283,12 @@ impl Connection {
             }
             ClientFrame::Input(input) => {
                 self.handle_input(input, scene, identity).await?;
+            }
+            ClientFrame::Unsubscribe(_) => {
+                // LSDP/1.1 §4.4 — clean teardown. The caller closes the WS
+                // immediately on Action::Stop ; no error frame is sent and
+                // no data flows after this point.
+                return Ok(Action::Stop);
             }
         }
         Ok(Action::Continue)
@@ -374,6 +392,8 @@ impl Connection {
             scene_id: scene.id().clone(),
             scene_version: scene.version().clone(),
             ts: Some(now_iso()),
+            from_scene_id: None,
+            transition: None,
         });
         self.send(&frame).await
     }
@@ -384,6 +404,7 @@ impl Connection {
             seq,
             patches: patches.to_vec(),
             ts: None,
+            cause: None,
         });
         self.send(&frame).await
     }

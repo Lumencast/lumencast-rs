@@ -149,14 +149,100 @@ pub struct Patch {
     /// Value to assign at `path`. MUST NOT be a JSON object — string,
     /// number, boolean, null, or array only (LSDP/1 §3.2).
     pub value: Value,
+    /// Per-leaf animation directive (LSDP/1.1 §3.2.2). Servers MAY
+    /// emit ; runtimes interpret when applying the new value. 1.0
+    /// receivers ignore. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<TransitionSpec>,
+}
+
+/// Per-leaf animation directive on a delta patch (LSDP/1.1 §3.2.2).
+/// Servers MAY emit ; runtimes interpret when applying the new value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TransitionSpec {
+    /// Linear interpolation over `duration_ms`, optionally eased.
+    Tween {
+        /// Duration in milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u32>,
+        /// Easing curve. Defaults to `linear` when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        easing: Option<Easing>,
+    },
+    /// Damped harmonic oscillator.
+    Spring {
+        /// Stiffness coefficient.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stiffness: Option<f64>,
+        /// Damping coefficient.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        damping: Option<f64>,
+    },
+    /// No animation — assign the new value immediately.
+    Snap,
+}
+
+/// Easing curve on a `TransitionSpec::Tween`. Strict closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Easing {
+    /// Constant rate of change.
+    Linear,
+    /// Accelerates from rest.
+    EaseIn,
+    /// Decelerates to rest.
+    EaseOut,
+    /// Accelerates then decelerates.
+    EaseInOut,
+}
+
+/// Optional provenance metadata on a delta (LSDP/1.1 §3.2.3). Receivers
+/// MUST NOT use it for semantic decisions — debug/audit only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cause {
+    /// Free-form origin tag, e.g. `"operator:user-abc"`,
+    /// `"adapter:http_poll"`, `"service:ranker"`.
+    pub source: String,
+    /// Echoes [`Input::client_msg_id`](crate::frames::Input) verbatim when the delta was
+    /// caused by an operator input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<String>,
+}
+
+/// Show-level scene-swap transition on a `scene_changed` frame
+/// (LSDP/1.1 §3.3.1). Runtimes that don't recognise `kind` fall back
+/// to crossfade.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneTransition {
+    /// Transition kind. `"crossfade"` is the only standard value in
+    /// 1.1 ; vendor-prefixed `x-vendor.*` kinds are valid wire shapes.
+    pub kind: String,
+    /// Duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u32>,
 }
 
 impl Patch {
-    /// Build a patch.
+    /// Build a patch without a transition directive.
     pub fn new(path: impl Into<LeafPath>, value: Value) -> Self {
         Self {
             path: path.into(),
             value,
+            transition: None,
+        }
+    }
+
+    /// Build a patch carrying a 1.1 transition directive.
+    pub fn with_transition(
+        path: impl Into<LeafPath>,
+        value: Value,
+        transition: TransitionSpec,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            value,
+            transition: Some(transition),
         }
     }
 

@@ -193,17 +193,17 @@ mod tests {
 
     #[test]
     fn ping_pong_round_trip() {
-        let p = ClientFrame::Ping;
+        let p = ClientFrame::Ping(crate::frames::Ping::default());
         let bytes = encode_client(&p).unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
         assert!(s.contains("\"v\":1"));
         assert!(s.contains("\"type\":\"ping\""));
         let back = decode_client(&bytes).unwrap();
-        assert_eq!(back, ClientFrame::Ping);
+        assert_eq!(back, ClientFrame::Ping(crate::frames::Ping::default()));
 
-        let pong = ServerFrame::Pong;
+        let pong = ServerFrame::Pong(crate::frames::Pong::default());
         let bytes = encode_server(&pong).unwrap();
         let back = decode_server(&bytes).unwrap();
-        assert_eq!(back, ServerFrame::Pong);
+        assert_eq!(back, ServerFrame::Pong(crate::frames::Pong::default()));
     }
 }

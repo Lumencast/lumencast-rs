@@ -57,6 +57,7 @@ impl Connection {
             token: token.clone(),
             scene: scene.cloned(),
             session: session.cloned(),
+            since_sequence: None,
         });
         let s = codec::encode_client_str(&subscribe)?;
         socket.send(Message::Text(s)).await?;

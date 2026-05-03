@@ -4,7 +4,8 @@
 
 use lumencast_protocol::codec;
 use lumencast_protocol::frames::{
-    ClientFrame, Delta, ErrorFrame, Input, SceneChanged, ServerFrame, Snapshot, Subscribe,
+    ClientFrame, Delta, ErrorFrame, Input, Ping, Pong, SceneChanged, ServerFrame, Snapshot,
+    Subscribe,
 };
 use lumencast_protocol::types::{Patch, SceneId, SceneVersion, SessionId, Token};
 use lumencast_protocol::{ErrorCode, LeafPath};
@@ -34,12 +35,15 @@ pub fn server_fixtures() -> Vec<ServerFrame> {
             seq: 2,
             patches: vec![Patch::new(LeafPath::from("count"), json!(1))],
             ts: None,
+            cause: None,
         }),
         ServerFrame::SceneChanged(SceneChanged {
             seq: 3,
             scene_id: SceneId::from("next"),
             scene_version: placeholder_version(),
             ts: None,
+            from_scene_id: None,
+            transition: None,
         }),
         ServerFrame::Error(ErrorFrame {
             seq: 4,
@@ -50,7 +54,7 @@ pub fn server_fixtures() -> Vec<ServerFrame> {
             path: None,
             ts: None,
         }),
-        ServerFrame::Pong,
+        ServerFrame::Pong(Pong::default()),
     ]
 }
 
@@ -61,16 +65,19 @@ pub fn client_fixtures() -> Vec<ClientFrame> {
             token: Token::from("op"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
         ClientFrame::Subscribe(Subscribe {
             token: Token::from("test"),
             scene: Some(SceneId::from("preview")),
             session: Some(SessionId::from("sess-1")),
+            since_sequence: None,
         }),
         ClientFrame::Input(Input {
             patches: vec![Patch::new(LeafPath::from("__inputs.title"), json!("New"))],
+            client_msg_id: None,
         }),
-        ClientFrame::Ping,
+        ClientFrame::Ping(Ping::default()),
     ]
 }
 

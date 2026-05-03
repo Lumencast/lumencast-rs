@@ -136,6 +136,7 @@ async fn tls_subscribe_yields_snapshot() {
         token: Token::from("op"),
         scene: None,
         session: None,
+        since_sequence: None,
     });
     let s = codec::encode_client_str(&subscribe).unwrap();
     ws.send(Message::Text(s)).await.expect("send subscribe");
