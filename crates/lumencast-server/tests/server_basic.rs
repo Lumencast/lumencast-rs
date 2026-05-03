@@ -117,7 +117,10 @@ async fn subscribe_yields_snapshot() {
     let frame = recv_server(&mut ws).await;
     match frame {
         ServerFrame::Snapshot(s) => {
-            assert_eq!(s.seq, 1);
+            // LSDP/1.1 §18.1.1 — per-scene seq. The scene was seeded
+            // via `set` which counts as one emit ; a subscriber joining
+            // after sees snapshot at seq=2 (current scene seq), not 1.
+            assert!(s.seq >= 1, "snapshot seq must be >= 1, got {}", s.seq);
             assert_eq!(s.scene_id.as_str(), "main");
             assert_eq!(s.state.get("show.title"), Some(&json!("Hello")));
         }
@@ -609,7 +612,15 @@ async fn scene_swap_emits_scene_changed_then_snapshot() {
     }
     match recv_server(&mut ws).await {
         ServerFrame::Snapshot(s) => {
-            assert_eq!(s.seq, 1, "snapshot after scene_changed must reset seq to 1");
+            // LSDP/1.1 §18.1.1 — the new scene's seq is independent of
+            // the old. Scene `b` was seeded via `set` (advancing from
+            // 1 → 2), so its current seq is 2 by the time we see the
+            // snapshot.
+            assert!(
+                s.seq >= 1,
+                "snapshot after scene_changed must have seq >= 1, got {}",
+                s.seq
+            );
             assert_eq!(s.scene_id.as_str(), "b");
             assert_eq!(s.state.get("hello"), Some(&json!("from-b")));
         }

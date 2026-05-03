@@ -29,11 +29,13 @@ pub struct Scene {
     inner: Arc<SceneInner>,
 }
 
-/// Broadcast payload : a delta's patches paired with optional
-/// LSDP/1.1 §3.2.3 provenance metadata. Subscribers consume both ;
-/// 1.0 callers leave `cause = None` to preserve the legacy wire shape.
+/// Broadcast payload : a delta's patches paired with the per-scene
+/// `seq` (LSDP/1.1 §18.1.1) and optional §3.2.3 provenance metadata.
+/// All concurrent subscribers receive the same payload — the seq is a
+/// property of the frame, not of any one connection.
 #[derive(Clone, Debug)]
 pub(crate) struct DeltaPayload {
+    pub seq: u64,
     pub patches: Arc<[Patch]>,
     pub cause: Option<Cause>,
 }
@@ -44,6 +46,14 @@ pub(crate) struct SceneInner {
     version: SceneVersion,
     pub(crate) store: Store,
     pub(crate) tx: broadcast::Sender<DeltaPayload>,
+    /// Per-scene monotonic seq counter (LSDP/1.1 §18.1.1). Initialised
+    /// to 1 so the first subscriber's snapshot ships at seq=1
+    /// (matches every existing 1.0 conformance scenario). Subsequent
+    /// emits increment to 2, 3, etc.
+    pub(crate) seq: parking_lot::Mutex<u64>,
+    /// Bounded ring of recent (seq, patches, cause) emissions for
+    /// LSDP/1.1 §18.1 incremental resume.
+    pub(crate) replay: parking_lot::Mutex<crate::replay_buffer::ReplayBuffer>,
     /// Canonical bytes of the LSML bundle backing this scene (set when
     /// the scene is registered via [`crate::ServerHandle::register_bundle`]).
     bundle_bytes: RwLock<Option<Arc<Vec<u8>>>>,
@@ -64,10 +74,29 @@ impl Scene {
                 version,
                 store: Store::new(),
                 tx,
+                seq: parking_lot::Mutex::new(1),
+                replay: parking_lot::Mutex::new(crate::replay_buffer::ReplayBuffer::new(
+                    crate::replay_buffer::DEFAULT_REPLAY_BUFFER_SIZE,
+                )),
                 bundle_bytes: RwLock::new(None),
                 declared_inputs: RwLock::new(None),
             }),
         }
+    }
+
+    /// LSDP/1.1 §18.1.1 — returns the scene's current seq counter.
+    /// Late-joining subscribers ship snapshot at this value.
+    #[must_use]
+    pub fn current_seq(&self) -> u64 {
+        *self.inner.seq.lock()
+    }
+
+    /// LSDP/1.1 §18.1 — returns the buffered records strictly after
+    /// `since_seq`. The boolean reports whether the buffer covers the
+    /// requested resume point.
+    #[must_use]
+    pub fn replay_since(&self, since_seq: u64) -> crate::replay_buffer::ReplaySlice {
+        self.inner.replay.lock().since(since_seq)
     }
 
     /// Attach canonical LSML bundle bytes to this scene, so the server
@@ -100,12 +129,36 @@ impl Scene {
         check_leaf_value(&value).map_err(|e| ServerError::InvalidValue(e.to_string()))?;
         self.inner.store.set(path.as_str(), value.clone());
         let patches: Arc<[Patch]> = Arc::from([Patch::new(path, value)]);
+        let seq = self.advance_seq();
+        self.inner
+            .replay
+            .lock()
+            .push(crate::replay_buffer::ReplayRecord {
+                seq,
+                patches: patches.clone(),
+                cause: None,
+            });
         // ignore receiver count: zero subscribers is fine.
         let _ = self.inner.tx.send(DeltaPayload {
+            seq,
             patches,
             cause: None,
         });
         Ok(())
+    }
+
+    /// LSDP/1.1 §18.1.1 — increment + return the per-scene seq.
+    fn advance_seq(&self) -> u64 {
+        let mut g = self.inner.seq.lock();
+        *g += 1;
+        *g
+    }
+
+    /// Public-crate variant of [`Self::advance_seq`] used by the WS
+    /// handler to allocate the `SceneChanged` frame's seq when migrating
+    /// off this scene.
+    pub(crate) fn advance_seq_for_change(&self) -> u64 {
+        self.advance_seq()
     }
 
     /// Apply many `(path, value)` patches atomically and broadcast a
@@ -142,7 +195,17 @@ impl Scene {
                 .map(|p| (p.path.as_str().to_string(), p.value.clone())),
         );
         let arc: Arc<[Patch]> = Arc::from(parsed.into_boxed_slice());
+        let seq = self.advance_seq();
+        self.inner
+            .replay
+            .lock()
+            .push(crate::replay_buffer::ReplayRecord {
+                seq,
+                patches: arc.clone(),
+                cause: cause.clone(),
+            });
         let _ = self.inner.tx.send(DeltaPayload {
+            seq,
             patches: arc,
             cause,
         });

@@ -48,6 +48,7 @@ mod bundle_route;
 mod config;
 mod error;
 mod input;
+mod replay_buffer;
 mod role;
 mod scene;
 mod server;

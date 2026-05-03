@@ -24,7 +24,7 @@ use lumencast_protocol::frames::{
 };
 use lumencast_protocol::types::Patch;
 use lumencast_protocol::{
-    ErrorCode, LumencastError, SceneId, SequenceAllocator, codec,
+    ErrorCode, LumencastError, SceneId, codec,
     envelope::{WEBSOCKET_SUBPROTOCOL, WEBSOCKET_SUBPROTOCOL_V1_1, WEBSOCKET_SUBPROTOCOLS},
 };
 use serde_json::Value;
@@ -105,7 +105,12 @@ enum HandlerError {
 struct Connection {
     socket: WebSocket,
     inner: Arc<ServerInner>,
-    seq: SequenceAllocator,
+    // LSDP/1.1 §18.1.1 — seq is per-scene, not per-connection. Outgoing
+    // frames read scene.current_seq() ; the connection no longer carries
+    // its own counter.
+    /// Set after scene resolution. Errors emitted before resolution
+    /// ship at seq=0 ; afterwards they ride this scene's current seq.
+    current_scene: Option<Scene>,
     rate: RateBucket,
 }
 
@@ -114,7 +119,7 @@ impl Connection {
         let limit = inner.config.input_rate_per_sec;
         Self {
             socket,
-            seq: SequenceAllocator::new(),
+            current_scene: None,
             rate: RateBucket::new(limit),
             inner,
         }
@@ -136,14 +141,32 @@ impl Connection {
                 .await?;
             return Ok(());
         };
+        self.current_scene = Some(scene.clone());
 
         // 4. Subscribe before snapshot so the broadcast cannot drop
         //    deltas that fire while we serialize the snapshot.
         let mut deltas_rx = scene.subscribe();
         let mut events_rx = self.inner.events.subscribe();
 
-        // 5. Snapshot.
-        self.send_snapshot(&scene).await?;
+        // 5. LSDP/1.1 §4.1, §18 — honour since_sequence when the replay
+        //    buffer covers the gap. Otherwise fall back to a fresh
+        //    snapshot at the current scene seq.
+        let mut sent_initial = false;
+        if let Some(since) = subscribe.since_sequence
+            && since > 0
+            && since <= scene.current_seq()
+        {
+            let slice = scene.replay_since(since);
+            if slice.covered {
+                for r in slice.records {
+                    self.send_delta(r.seq, &r.patches, r.cause).await?;
+                }
+                sent_initial = true;
+            }
+        }
+        if !sent_initial {
+            self.send_snapshot(&scene).await?;
+        }
 
         // 6. Main loop.
         let mut current = scene;
@@ -176,10 +199,14 @@ impl Connection {
                     match ev {
                         Ok(ServerEvent::SceneSwap { scene_id }) => {
                             if let Some(new_scene) = self.inner.scene(scene_id.as_str()) {
-                                self.send_scene_changed(&new_scene).await?;
-                                self.seq.reset();
+                                // §18.1.1 — scene_changed advances the OLD scene's
+                                // seq one final step ; the snapshot then ships at
+                                // the NEW scene's current seq.
+                                let prev_seq = current.advance_seq_for_change();
+                                self.send_scene_changed(&new_scene, prev_seq).await?;
                                 self.send_snapshot(&new_scene).await?;
                                 deltas_rx = new_scene.subscribe();
+                                self.current_scene = Some(new_scene.clone());
                                 current = new_scene;
                             }
                         }
@@ -196,7 +223,7 @@ impl Connection {
                 payload = deltas_rx.recv() => {
                     match payload {
                         Ok(p) => {
-                            self.send_delta(&p.patches, p.cause).await?;
+                            self.send_delta(p.seq, &p.patches, p.cause).await?;
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             self.send_error(ErrorCode::Internal, "delta stream lagged", true).await?;
@@ -392,7 +419,8 @@ impl Connection {
     }
 
     async fn send_snapshot(&mut self, scene: &Scene) -> Result<(), HandlerError> {
-        let seq = self.seq.next();
+        // LSDP/1.1 §18.1.1 — snapshot ships at the scene's current seq.
+        let seq = scene.current_seq();
         let frame = ServerFrame::Snapshot(Snapshot {
             seq,
             scene_id: scene.id().clone(),
@@ -403,12 +431,11 @@ impl Connection {
         self.send(&frame).await
     }
 
-    async fn send_scene_changed(&mut self, scene: &Scene) -> Result<(), HandlerError> {
-        let seq = self.seq.next();
+    async fn send_scene_changed(&mut self, next: &Scene, seq: u64) -> Result<(), HandlerError> {
         let frame = ServerFrame::SceneChanged(SceneChanged {
             seq,
-            scene_id: scene.id().clone(),
-            scene_version: scene.version().clone(),
+            scene_id: next.id().clone(),
+            scene_version: next.version().clone(),
             ts: Some(now_iso()),
             from_scene_id: None,
             transition: None,
@@ -418,10 +445,10 @@ impl Connection {
 
     async fn send_delta(
         &mut self,
+        seq: u64,
         patches: &[Patch],
         cause: Option<lumencast_protocol::types::Cause>,
     ) -> Result<(), HandlerError> {
-        let seq = self.seq.next();
         let frame = ServerFrame::Delta(Delta {
             seq,
             patches: patches.to_vec(),
@@ -448,7 +475,11 @@ impl Connection {
         recoverable: bool,
         path: Option<String>,
     ) -> Result<(), HandlerError> {
-        let seq = self.seq.next();
+        // Errors are connection-scoped events ; they ride the current
+        // scene seq without advancing it (§18.1.1). Pre-subscribe errors
+        // (auth denied, scene unknown) ship at seq=0 — those don't have
+        // an active scene yet.
+        let seq = self.current_scene.as_ref().map_or(0, Scene::current_seq);
         let frame = ServerFrame::Error(ErrorFrame {
             seq,
             code,
