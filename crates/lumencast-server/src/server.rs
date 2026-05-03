@@ -143,6 +143,15 @@ impl ServerHandle {
     pub fn scene(&self, id: &str) -> Option<Scene> {
         self.inner.scene(id)
     }
+
+    /// Drop every registered scene and reset the active-scene pointer.
+    /// Used by interop test resets — calling this while connections
+    /// are alive produces broadcast errors and forces clients to
+    /// reconnect.
+    pub fn clear_scenes(&self) {
+        self.inner.scenes.clear();
+        *self.inner.active.write() = None;
+    }
 }
 
 impl Server {
@@ -195,6 +204,11 @@ impl Server {
         self.handle().active_scene()
     }
 
+    /// Drop every registered scene.
+    pub fn clear_scenes(&self) {
+        self.handle().clear_scenes();
+    }
+
     /// Run the server until cancelled. Consumes `self`.
     pub async fn run(self) -> Result<(), ServerError> {
         axum::serve(self.listener, build_router(self.inner)).await?;
@@ -216,9 +230,14 @@ impl Server {
 
 /// Build the axum router with the WS endpoint and the bundle-serving
 /// route.
+///
+/// Two WebSocket paths are mounted: `/ws` (the default) and
+/// `/lsdp.v1` (the path used by the cross-language interop matrix —
+/// see `lumencast-protocol/interop/CONTROL.md`).
 pub(crate) fn build_router(inner: Arc<ServerInner>) -> Router {
     Router::new()
         .route("/ws", get(ws_route))
+        .route("/lsdp.v1", get(ws_route))
         .route("/scenes/:scene_id/:version_hex", get(scene_bundle_route))
         .with_state(inner)
 }

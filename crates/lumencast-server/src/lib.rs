@@ -51,6 +51,8 @@ mod role;
 mod scene;
 mod server;
 mod store;
+#[cfg(feature = "interop-control-plane")]
+pub mod test_control;
 #[cfg(feature = "tls")]
 pub mod tls;
 mod ws_handler;

@@ -26,6 +26,9 @@ adapters-http = ["dep:reqwest"]
 adapters-ws = ["dep:tokio-tungstenite"]
 ## Convenience: enable every adapter.
 adapters = ["adapters-http", "adapters-ws"]
+## Enable the cross-language interop test control plane (LSDP/1
+## interop CONTROL.md). OFF by default — never bundle in production.
+interop-control-plane = []
 
 [dependencies]
 lumencast-protocol = { workspace = true }

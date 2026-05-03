@@ -94,6 +94,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p lumencast-conformance --release
 
+  interop-self:
+    name: interop self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Build the binary first so the self-interop integration test can
+      # spawn it. CARGO_BIN_EXE_lumencast wires the path automatically.
+      - run: cargo build --release --bin lumencast
+      - run: cargo test -p lumencast-cli --test self_interop --release
+
   secret-scan:
     name: secret scan
     runs-on: ubuntu-latest
