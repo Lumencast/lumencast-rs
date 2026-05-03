@@ -180,11 +180,11 @@ mod tests {
         );
 
         // Wait for at least one delta.
-        let patches = tokio::time::timeout(Duration::from_secs(3), subscriber.recv())
+        let payload = tokio::time::timeout(Duration::from_secs(3), subscriber.recv())
             .await
             .expect("delta within 3s")
             .expect("recv");
-        let mut paths: Vec<&str> = patches.iter().map(|p| p.path.as_str()).collect();
+        let mut paths: Vec<&str> = payload.patches.iter().map(|p| p.path.as_str()).collect();
         paths.sort_unstable();
         assert!(
             paths.contains(&"match.minute") && paths.contains(&"match.score.home"),
