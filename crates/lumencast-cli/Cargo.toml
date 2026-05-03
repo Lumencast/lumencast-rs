@@ -1,0 +1,36 @@
+[package]
+name = "lumencast-cli"
+description = "Lumencast CLI — `lumencast serve-scenario` and `lumencast conformance` for the cross-language interop matrix."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lumencast"
+path = "src/main.rs"
+
+[dependencies]
+lumencast-protocol    = { workspace = true }
+lumencast-server      = { workspace = true, features = ["interop-control-plane"] }
+lumencast-conformance = { workspace = true }
+
+clap        = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "signal"] }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+axum        = { workspace = true, features = ["tokio", "http1", "json"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "process", "io-util"] }
+serde_json = { workspace = true }

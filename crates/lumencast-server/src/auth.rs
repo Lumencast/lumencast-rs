@@ -81,6 +81,23 @@ impl MapAuthenticator {
     pub fn remove(&mut self, token: &str) -> Option<Identity> {
         self.inner.write().remove(token)
     }
+
+    /// Drop every registered token. Used by interop test resets.
+    pub fn clear(&self) {
+        self.inner.write().clear();
+    }
+
+    /// Number of registered tokens.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    /// Returns `true` if no tokens are registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
 }
 
 #[async_trait]
