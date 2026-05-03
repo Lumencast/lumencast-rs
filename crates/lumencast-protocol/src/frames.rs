@@ -76,6 +76,10 @@ pub struct ErrorFrame {
     /// Optional retry hint, set by the server for `RATE_LIMIT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+    /// Offending leaf path. Set by the server for `UNKNOWN_PATH` and
+    /// `INVALID_VALUE` so the harness can localise authoring errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Optional server timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,

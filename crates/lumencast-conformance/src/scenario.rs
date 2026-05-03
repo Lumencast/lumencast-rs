@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -83,9 +83,15 @@ fn default_target() -> Target {
     Target::Any
 }
 
-/// One step in a scenario. Each step is one YAML map with exactly one
-/// of the following keys (custom `Deserialize` so the YAML stays
-/// natural — `- client-sends: {frame: ...}` rather than a tagged enum).
+/// One step in a scenario. The YAML shape follows
+/// [`SCENARIO-FORMAT.md`](https://github.com/Lumencast/lumencast-protocol/blob/main/conformance/v1/SCENARIO-FORMAT.md)
+/// — every step is a map with a `kind:` discriminator and per-kind
+/// body fields at the same level :
+///
+/// ```yaml
+/// - kind: client-sends
+///   frame: { v: 1, type: subscribe }
+/// ```
 #[derive(Debug, Clone, Serialize)]
 pub enum Step {
     /// Harness sends a JSON frame to the server.
@@ -100,100 +106,96 @@ pub enum Step {
     ExpectNoFrameFor { duration_ms: u64 },
     /// Assert a particular client behaviour.
     ExpectClientAction(ClientAction),
-    /// Schedule a server-side delta via `POST /test/emit`.
-    ServerEmits { patches: Vec<EmitPatch> },
+    /// Trigger a server-side delta via `POST /test/emit`, then validate
+    /// the wire frame matches the expected `frame` (which carries the
+    /// patches inline per SCENARIO-FORMAT.md § server-emits).
+    ServerEmits { frame: Value },
+    /// Step kind not handled by this server-target harness. Typically
+    /// runtime-only verbs (`client-action`, future extensions). Lazy
+    /// — only fails the run when the scenario actually executes ;
+    /// runtime-target scenarios are auto-skipped before reaching it.
+    Unsupported {
+        kind: String,
+        #[allow(dead_code)]
+        body: BTreeMap<String, Value>,
+    },
 }
 
 impl<'de> Deserialize<'de> for Step {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct StepVisitor;
-
-        impl<'de> Visitor<'de> for StepVisitor {
-            type Value = Step;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a single-key map { kebab-step-name: body }")
-            }
-
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Step, M::Error> {
-                let key: String = map
-                    .next_key()?
-                    .ok_or_else(|| de::Error::custom("step must have one key"))?;
-                let body: Value = map.next_value()?;
-                if map.next_key::<String>()?.is_some() {
-                    return Err(de::Error::custom(format!(
-                        "step {key:?}: extra keys forbidden"
-                    )));
-                }
-                step_from_body(&key, body).map_err(de::Error::custom)
-            }
-        }
-
-        deserializer.deserialize_map(StepVisitor)
+        let raw: BTreeMap<String, Value> = BTreeMap::deserialize(deserializer)?;
+        let kind = raw
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| de::Error::custom("step is missing required `kind` field"))?
+            .to_string();
+        step_from_kind(&kind, &raw).map_err(de::Error::custom)
     }
 }
 
-fn step_from_body(key: &str, body: Value) -> Result<Step, String> {
-    fn take<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
-        serde_json::from_value(value).map_err(|e| e.to_string())
+fn step_from_kind(kind: &str, raw: &BTreeMap<String, Value>) -> Result<Step, String> {
+    fn frame_field(raw: &BTreeMap<String, Value>) -> Result<Value, String> {
+        raw.get("frame")
+            .cloned()
+            .ok_or_else(|| "step missing `frame` field".to_string())
+    }
+    fn state_field(raw: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, String> {
+        let v = raw
+            .get("state")
+            .cloned()
+            .ok_or_else(|| "step missing `state` field".to_string())?;
+        serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
-    match key {
-        "client-sends" => {
-            #[derive(Deserialize)]
-            struct B {
-                frame: Value,
-            }
-            let b: B = take(body)?;
-            Ok(Step::ClientSends { frame: b.frame })
-        }
-        "server-sends" => {
-            #[derive(Deserialize)]
-            struct B {
-                frame: Value,
-            }
-            let b: B = take(body)?;
-            Ok(Step::ServerSends { frame: b.frame })
-        }
-        "expect-runtime-state" => {
-            #[derive(Deserialize)]
-            struct B {
-                state: BTreeMap<String, Value>,
-            }
-            let b: B = take(body)?;
-            Ok(Step::ExpectRuntimeState { state: b.state })
-        }
-        "expect-server-state" => {
-            #[derive(Deserialize)]
-            struct B {
-                state: BTreeMap<String, Value>,
-            }
-            let b: B = take(body)?;
-            Ok(Step::ExpectServerState { state: b.state })
-        }
+    match kind {
+        "client-sends" => Ok(Step::ClientSends {
+            frame: frame_field(raw)?,
+        }),
+        "server-sends" => Ok(Step::ServerSends {
+            frame: frame_field(raw)?,
+        }),
+        "server-emits" => Ok(Step::ServerEmits {
+            frame: frame_field(raw)?,
+        }),
+        "expect-runtime-state" => Ok(Step::ExpectRuntimeState {
+            state: state_field(raw)?,
+        }),
+        "expect-server-state" => Ok(Step::ExpectServerState {
+            state: state_field(raw)?,
+        }),
         "expect-no-frame-for" => {
-            #[derive(Deserialize)]
-            struct B {
-                duration_ms: u64,
-            }
-            let b: B = take(body)?;
-            Ok(Step::ExpectNoFrameFor {
-                duration_ms: b.duration_ms,
-            })
+            let duration_ms = raw
+                .get("duration_ms")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "expect-no-frame-for missing `duration_ms`".to_string())?;
+            Ok(Step::ExpectNoFrameFor { duration_ms })
         }
         "expect-client-action" => {
-            let action: ClientAction = take(body)?;
+            let mut body = serde_json::Map::new();
+            for (k, v) in raw {
+                if k == "kind" {
+                    continue;
+                }
+                body.insert(k.clone(), v.clone());
+            }
+            let action: ClientAction =
+                serde_json::from_value(Value::Object(body)).map_err(|e| e.to_string())?;
             Ok(Step::ExpectClientAction(action))
         }
-        "server-emits" => {
-            #[derive(Deserialize)]
-            struct B {
-                patches: Vec<EmitPatch>,
-            }
-            let b: B = take(body)?;
-            Ok(Step::ServerEmits { patches: b.patches })
+        other => {
+            // Unknown step kind — keep the body around so we can
+            // surface a useful error if the scenario actually runs,
+            // but don't reject at parse time. Runtime-target
+            // scenarios are auto-skipped, so unfamiliar verbs they
+            // contain (`client-action`, future extensions) are
+            // tolerated.
+            let mut body = raw.clone();
+            body.remove("kind");
+            Ok(Step::Unsupported {
+                kind: other.to_string(),
+                body,
+            })
         }
-        other => Err(format!("unknown step kind {other:?}")),
     }
 }
 
@@ -205,13 +207,23 @@ pub struct EmitPatch {
 }
 
 /// Body of `expect-client-action`.
+///
+/// The set of `action` names is open-ended at the spec level — new
+/// actions may be added without breaking older harnesses (e.g.
+/// `fetch-bundle`, `onError`). We therefore parse the action verb as
+/// a string and keep the rest of the body as a generic map ; runtime
+/// dispatch decides whether a given action is supported.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "kebab-case")]
-pub enum ClientAction {
-    /// The client closed the connection with a specific reason.
-    CloseWithReason { reason: String },
-    /// The client opened a fresh connection.
-    Reconnect,
+pub struct ClientAction {
+    /// Action verb (`close-with-reason`, `reconnect`, `fetch-bundle`,
+    /// `onError`, …). Unknown verbs are not a parse error — they
+    /// surface as runtime "unsupported" failures only if the
+    /// containing scenario actually executes (target=server skips
+    /// runtime-only scenarios before they reach this step).
+    pub action: String,
+    /// Arbitrary additional fields per the action's contract.
+    #[serde(flatten)]
+    pub fields: BTreeMap<String, Value>,
 }
 
 /// Failure raised while parsing a scenario file.
@@ -256,26 +268,26 @@ initial_state:
   title: Hello
   count: 0
 steps:
-  - client-sends:
-      frame:
-        v: 1
-        type: subscribe
-        token: $TOKEN_OPERATOR
-        scene: t
-  - server-sends:
-      frame:
-        v: 1
-        type: snapshot
-        seq: 1
-        scene_id: t
-        scene_version: $BUNDLE.t.hash
-        state:
-          title: Hello
-          count: 0
-  - expect-runtime-state:
+  - kind: client-sends
+    frame:
+      v: 1
+      type: subscribe
+      token: $TOKEN_OPERATOR
+      scene: t
+  - kind: server-sends
+    frame:
+      v: 1
+      type: snapshot
+      seq: 1
+      scene_id: t
+      scene_version: $BUNDLE.t.hash
       state:
         title: Hello
         count: 0
+  - kind: expect-runtime-state
+    state:
+      title: Hello
+      count: 0
 ";
         let scenario = Scenario::parse(yaml).expect("parses");
         assert_eq!(scenario.name, "subscribe-snapshot-delta");
@@ -289,8 +301,8 @@ steps:
         let yaml = r"
 name: rate-limit
 steps:
-  - expect-no-frame-for:
-      duration_ms: 250
+  - kind: expect-no-frame-for
+    duration_ms: 250
 ";
         let scenario = Scenario::parse(yaml).expect("parses");
         match &scenario.steps[0] {
@@ -304,21 +316,27 @@ steps:
         let yaml = r"
 name: gap-reconnect
 steps:
-  - expect-client-action:
-      action: close-with-reason
-      reason: VERSION_GAP
-  - expect-client-action:
-      action: reconnect
+  - kind: expect-client-action
+    action: close-with-reason
+    reason: VERSION_GAP
+  - kind: expect-client-action
+    action: reconnect
 ";
         let scenario = Scenario::parse(yaml).expect("parses");
         match &scenario.steps[0] {
-            Step::ExpectClientAction(ClientAction::CloseWithReason { reason }) => {
-                assert_eq!(reason, "VERSION_GAP");
+            Step::ExpectClientAction(action) => {
+                assert_eq!(action.action, "close-with-reason");
+                assert_eq!(
+                    action.fields.get("reason").and_then(Value::as_str),
+                    Some("VERSION_GAP")
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
         match &scenario.steps[1] {
-            Step::ExpectClientAction(ClientAction::Reconnect) => {}
+            Step::ExpectClientAction(action) => {
+                assert_eq!(action.action, "reconnect");
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

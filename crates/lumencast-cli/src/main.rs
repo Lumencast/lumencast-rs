@@ -199,13 +199,23 @@ fn print_report(report: &lumencast_conformance::Report) {
         return;
     }
     for outcome in &report.outcomes {
-        let tag = if outcome.passed { "PASS" } else { "FAIL" };
+        let tag = if outcome.skipped {
+            "SKIP"
+        } else if outcome.passed {
+            "PASS"
+        } else {
+            "FAIL"
+        };
         match &outcome.message {
             Some(m) => eprintln!("[conformance] {tag} {} — {m}", outcome.name),
             None => eprintln!("[conformance] {tag} {}", outcome.name),
         }
     }
-    eprintln!("[conformance] {} / {} passed", report.passed, report.total);
+    let failed = report.total - report.passed - report.skipped;
+    eprintln!(
+        "[conformance] {} / {} passed ({} skipped, {} failed)",
+        report.passed, report.total, report.skipped, failed
+    );
 }
 
 /// Load the placeholder→token map. Default = canonical interop tokens.

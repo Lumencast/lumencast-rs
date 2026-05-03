@@ -156,51 +156,50 @@ initial_state:
   title: Hello
   count: 0
 steps:
-  - client-sends:
-      frame:
-        v: 1
-        type: subscribe
-        token: $TOKEN_OPERATOR
-        scene: t
-  - server-sends:
-      frame:
-        v: 1
-        type: snapshot
-        seq: 1
-        scene_id: t
-  - expect-runtime-state:
-      state:
-        title: Hello
-        count: 0
-  - client-sends:
-      frame:
-        v: 1
-        type: input
-        patches:
-          - path: __inputs.title
-            value: Updated
-  - server-sends:
-      frame:
-        v: 1
-        type: delta
-        seq: 2
-  - expect-runtime-state:
-      state:
-        __inputs.title: Updated
-  - server-emits:
+  - kind: client-sends
+    frame:
+      v: 1
+      type: subscribe
+      token: $TOKEN_OPERATOR
+      scene: t
+  - kind: server-sends
+    frame:
+      v: 1
+      type: snapshot
+      seq: 1
+      scene_id: t
+  - kind: expect-runtime-state
+    state:
+      title: Hello
+      count: 0
+  - kind: client-sends
+    frame:
+      v: 1
+      type: input
+      patches:
+        - path: __inputs.title
+          value: Updated
+  - kind: server-sends
+    frame:
+      v: 1
+      type: delta
+      seq: 2
+  - kind: expect-runtime-state
+    state:
+      __inputs.title: Updated
+  - kind: server-emits
+    frame:
+      v: 1
+      type: delta
+      seq: 3
       patches:
         - path: count
           value: 7
-  - server-sends:
-      frame:
-        v: 1
-        type: delta
-        seq: 3
-  - expect-server-state:
-      state:
-        title: Hello
-        __inputs.title: Updated
-        count: 7
+  - kind: expect-server-state
+    state:
+      title: Hello
+      __inputs.title: Updated
+      count: 7
 "
     .to_string()
 }
