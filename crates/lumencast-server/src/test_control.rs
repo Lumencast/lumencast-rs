@@ -67,12 +67,32 @@ pub fn router(state: TestControlState) -> Router {
 struct SetupRequest {
     #[serde(default)]
     scenario: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser_btreemap_or_null")]
     tokens: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser_vec_or_null")]
     bundles: Vec<SetupBundle>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser_btreemap_or_null")]
     initial_state: BTreeMap<String, Value>,
+}
+
+/// Accept `null` as an empty `BTreeMap`. The cross-language harness
+/// emits `"initial_state": null` for scenarios with no seeded state ;
+/// stricter SDKs reject it as 422 otherwise.
+fn deser_btreemap_or_null<'de, D, T>(de: D) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<BTreeMap<String, T>>::deserialize(de)?.unwrap_or_default())
+}
+
+/// Accept `null` as an empty `Vec`.
+fn deser_vec_or_null<'de, D, T>(de: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(de)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
