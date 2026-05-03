@@ -109,6 +109,7 @@ async fn subscribe_yields_snapshot() {
             token: Token::from("op"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -152,6 +153,7 @@ async fn operator_input_fans_out_as_delta() {
             token: Token::from("op"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -161,6 +163,7 @@ async fn operator_input_fans_out_as_delta() {
             token: Token::from("viewer"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -177,6 +180,7 @@ async fn operator_input_fans_out_as_delta() {
                 LeafPath::from("__inputs.title"),
                 json!("Hello world"),
             )],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -221,6 +225,7 @@ async fn viewer_input_is_rejected() {
             token: Token::from("viewer"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -230,6 +235,7 @@ async fn viewer_input_is_rejected() {
         &mut ws,
         &ClientFrame::Input(Input {
             patches: vec![Patch::new(LeafPath::from("__inputs.title"), json!("nope"))],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -275,6 +281,7 @@ async fn declared_inputs_unknown_path_rejected() {
             token: Token::from("op"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -288,6 +295,7 @@ async fn declared_inputs_unknown_path_rejected() {
                 LeafPath::from("__inputs.does_not_exist"),
                 json!("x"),
             )],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -357,6 +365,7 @@ async fn declared_inputs_invalid_value_rejected() {
             token: Token::from("op"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -370,6 +379,7 @@ async fn declared_inputs_invalid_value_rejected() {
                 LeafPath::from("__inputs.title"),
                 json!("way too long"),
             )],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -383,6 +393,7 @@ async fn declared_inputs_invalid_value_rejected() {
                 LeafPath::from("__inputs.theme"),
                 json!("rainbow"),
             )],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -393,6 +404,7 @@ async fn declared_inputs_invalid_value_rejected() {
         &mut ws,
         &ClientFrame::Input(Input {
             patches: vec![Patch::new(LeafPath::from("__inputs.score"), json!(999))],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -406,6 +418,7 @@ async fn declared_inputs_invalid_value_rejected() {
                 Patch::new(LeafPath::from("__inputs.title"), json!("ok")),
                 Patch::new(LeafPath::from("__inputs.score"), json!(-1)),
             ],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -416,6 +429,7 @@ async fn declared_inputs_invalid_value_rejected() {
         &mut ws,
         &ClientFrame::Input(Input {
             patches: vec![Patch::new(LeafPath::from("__inputs.title"), json!("hi"))],
+            client_msg_id: None,
         }),
     )
     .await;
@@ -453,6 +467,7 @@ async fn auth_denied_closes() {
             token: Token::from("garbage"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -521,6 +536,7 @@ async fn register_bundle_seeds_state_and_serves_bytes() {
             token: Token::from("op"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
@@ -573,6 +589,7 @@ async fn scene_swap_emits_scene_changed_then_snapshot() {
             token: Token::from("op"),
             scene: None,
             session: None,
+            since_sequence: None,
         }),
     )
     .await;
