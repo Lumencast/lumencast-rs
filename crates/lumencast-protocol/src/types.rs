@@ -204,7 +204,7 @@ pub struct Cause {
     /// Free-form origin tag, e.g. `"operator:user-abc"`,
     /// `"adapter:http_poll"`, `"service:ranker"`.
     pub source: String,
-    /// Echoes [`Input::client_msg_id`] verbatim when the delta was
+    /// Echoes [`Input::client_msg_id`](crate::frames::Input) verbatim when the delta was
     /// caused by an operator input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_id: Option<String>,
