@@ -92,7 +92,22 @@ impl SequenceTracker {
     }
 
     /// Variant of [`SequenceTracker::observe`] that takes a raw `seq`.
+    ///
+    /// LSDP/1.1 §18.1.1 — the first frame on a fresh tracker accepts
+    /// any `seq >= 1` as the baseline (per-scene seq, late-joining
+    /// subscribers may see snapshot at `seq > 1`). `seq == 0` is
+    /// still invalid.
     pub fn observe_seq(&mut self, seq: u64) -> Result<Observation, LumencastError> {
+        if self.last == 0 && seq < 1 {
+            return Err(LumencastError::SequenceGap {
+                expected: 1,
+                got: seq,
+            });
+        }
+        if self.last == 0 {
+            self.last = seq;
+            return Ok(Observation::Accepted);
+        }
         if seq <= self.last {
             return Ok(Observation::Duplicate);
         }
@@ -104,7 +119,18 @@ impl SequenceTracker {
         Ok(Observation::Accepted)
     }
 
-    /// Reset to `0`. The next valid frame must therefore have `seq = 1`.
+    /// Rebase the tracker to a snapshot's `seq`. Called after
+    /// `scene_changed` or back-pressure recovery — the tracker takes
+    /// the snapshot value as the new baseline regardless of previous
+    /// state.
+    pub fn observe_snapshot(&mut self, seq: u64) {
+        if seq >= 1 {
+            self.last = seq;
+        }
+    }
+
+    /// Reset to `0`. Use [`Self::observe_snapshot`] instead when
+    /// rebasing to a known snapshot seq.
     pub fn reset(&mut self) {
         self.last = 0;
     }
@@ -168,5 +194,35 @@ mod tests {
         t.observe_seq(2).unwrap();
         t.reset();
         assert_eq!(t.observe_seq(1).unwrap(), Observation::Accepted);
+    }
+
+    #[test]
+    fn tracker_accepts_late_join_baseline() {
+        // LSDP/1.1 §18.1.1 — fresh tracker accepts any seq >= 1 as the
+        // baseline (per-scene seq, late-joining subscribers may see
+        // snapshot at seq > 1).
+        let mut t = SequenceTracker::new();
+        assert_eq!(t.observe_seq(42).unwrap(), Observation::Accepted);
+        assert_eq!(t.observe_seq(43).unwrap(), Observation::Accepted);
+        assert_eq!(t.last(), 43);
+    }
+
+    #[test]
+    fn tracker_rejects_seq_zero() {
+        let mut t = SequenceTracker::new();
+        let err = t.observe_seq(0).unwrap_err();
+        assert!(matches!(err, LumencastError::SequenceGap { .. }));
+    }
+
+    #[test]
+    fn observe_snapshot_rebases() {
+        // After scene_changed or back-pressure recovery, the tracker
+        // takes the snapshot seq as the new baseline.
+        let mut t = SequenceTracker::new();
+        t.observe_seq(1).unwrap();
+        t.observe_seq(2).unwrap();
+        t.observe_snapshot(5);
+        assert_eq!(t.last(), 5);
+        assert_eq!(t.observe_seq(6).unwrap(), Observation::Accepted);
     }
 }
