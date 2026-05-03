@@ -1,0 +1,26 @@
+[package]
+name = "lumencast-protocol"
+description = "LSDP/1 wire protocol for Lumencast — envelope, frames, codec, leaf paths, errors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+sha2        = { workspace = true }
+
+[dev-dependencies]
+serde_json  = { workspace = true }

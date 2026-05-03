@@ -1,0 +1,11 @@
+/target
+Cargo.lock.bak
+**/*.rs.bk
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+.health.json
+.env
+.env.local

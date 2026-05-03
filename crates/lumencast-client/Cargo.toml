@@ -1,0 +1,36 @@
+[package]
+name = "lumencast-client"
+description = "LSDP/1 protocol client — connect, sequence tracking with gap-detect reconnect, seamless token rotation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencast-protocol = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { workspace = true, features = ["std", "sink"] }
+http       = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+lumencast-server = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }

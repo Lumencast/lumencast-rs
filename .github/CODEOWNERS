@@ -1,0 +1,13 @@
+# CODEOWNERS — every file routes through the maintainer until the
+# project grows enough to support a multi-team model. When teams are
+# formalized (per the protocol repo's GOVERNANCE.md § Phases),
+# update this file.
+
+*                                  @ClodoCapeo
+
+# Protocol-critical paths
+/crates/lumencast-protocol/        @ClodoCapeo
+/crates/lumencast-conformance/     @ClodoCapeo
+
+# Release flow
+/.github/workflows/release.yml     @ClodoCapeo

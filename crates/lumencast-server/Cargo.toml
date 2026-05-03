@@ -1,0 +1,57 @@
+[package]
+name = "lumencast-server"
+description = "Server kit for Lumencast on axum + tokio — scenes, store, auth, role enforcement, WS handler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+## Enable TLS termination via `axum-server` + `rustls`.
+tls = ["dep:axum-server"]
+## Enable the `http_poll` adapter (pulls `reqwest`).
+adapters-http = ["dep:reqwest"]
+## Enable the `websocket_subscribe` adapter (pulls `tokio-tungstenite`).
+adapters-ws = ["dep:tokio-tungstenite"]
+## Convenience: enable every adapter.
+adapters = ["adapters-http", "adapters-ws"]
+
+[dependencies]
+lumencast-protocol = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+async-trait = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal", "fs"] }
+axum  = { workspace = true, features = ["ws", "tokio", "http1", "json"] }
+tower-http = { workspace = true, features = ["trace", "limit"] }
+http       = { workspace = true }
+futures-util = { workspace = true, features = ["std", "sink"] }
+
+tracing = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+
+axum-server = { workspace = true, optional = true, features = ["tls-rustls-no-provider"] }
+reqwest     = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true, features = ["connect", "rustls-tls-native-roots"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
