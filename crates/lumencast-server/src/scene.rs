@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lumencast_protocol::frames::State;
-use lumencast_protocol::types::{Patch, SceneId, SceneVersion};
+use lumencast_protocol::types::{Cause, Patch, SceneId, SceneVersion};
 use lumencast_protocol::{ErrorCode, LeafPath, types::check_leaf_value};
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -29,12 +29,21 @@ pub struct Scene {
     inner: Arc<SceneInner>,
 }
 
+/// Broadcast payload : a delta's patches paired with optional
+/// LSDP/1.1 §3.2.3 provenance metadata. Subscribers consume both ;
+/// 1.0 callers leave `cause = None` to preserve the legacy wire shape.
+#[derive(Clone, Debug)]
+pub(crate) struct DeltaPayload {
+    pub patches: Arc<[Patch]>,
+    pub cause: Option<Cause>,
+}
+
 #[derive(Debug)]
 pub(crate) struct SceneInner {
     id: SceneId,
     version: SceneVersion,
     pub(crate) store: Store,
-    pub(crate) tx: broadcast::Sender<Arc<[Patch]>>,
+    pub(crate) tx: broadcast::Sender<DeltaPayload>,
     /// Canonical bytes of the LSML bundle backing this scene (set when
     /// the scene is registered via [`crate::ServerHandle::register_bundle`]).
     bundle_bytes: RwLock<Option<Arc<Vec<u8>>>>,
@@ -92,13 +101,28 @@ impl Scene {
         self.inner.store.set(path.as_str(), value.clone());
         let patches: Arc<[Patch]> = Arc::from([Patch::new(path, value)]);
         // ignore receiver count: zero subscribers is fine.
-        let _ = self.inner.tx.send(patches);
+        let _ = self.inner.tx.send(DeltaPayload {
+            patches,
+            cause: None,
+        });
         Ok(())
     }
 
     /// Apply many `(path, value)` patches atomically and broadcast a
     /// single delta containing all of them.
     pub fn emit<I, S>(&self, patches: I) -> Result<(), ServerError>
+    where
+        I: IntoIterator<Item = (S, Value)>,
+        S: Into<String>,
+    {
+        self.emit_with_cause(patches, None)
+    }
+
+    /// LSDP/1.1 §3.2.3 — same as [`Self::emit`] but the resulting Delta
+    /// frame carries the supplied [`Cause`] as provenance. Adapters
+    /// and operator-input pipelines use this to thread origin info
+    /// through to the wire. 1.0 callers stay on `emit`.
+    pub fn emit_with_cause<I, S>(&self, patches: I, cause: Option<Cause>) -> Result<(), ServerError>
     where
         I: IntoIterator<Item = (S, Value)>,
         S: Into<String>,
@@ -118,7 +142,10 @@ impl Scene {
                 .map(|p| (p.path.as_str().to_string(), p.value.clone())),
         );
         let arc: Arc<[Patch]> = Arc::from(parsed.into_boxed_slice());
-        let _ = self.inner.tx.send(arc);
+        let _ = self.inner.tx.send(DeltaPayload {
+            patches: arc,
+            cause,
+        });
         Ok(())
     }
 
@@ -142,7 +169,7 @@ impl Scene {
     }
 
     /// Subscribe to the patch broadcast channel.
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<[Patch]>> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<DeltaPayload> {
         self.inner.tx.subscribe()
     }
 

@@ -193,10 +193,10 @@ impl Connection {
                     }
                 }
 
-                patches = deltas_rx.recv() => {
-                    match patches {
-                        Ok(arc) => {
-                            self.send_delta(&arc).await?;
+                payload = deltas_rx.recv() => {
+                    match payload {
+                        Ok(p) => {
+                            self.send_delta(&p.patches, p.cause).await?;
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             self.send_error(ErrorCode::Internal, "delta stream lagged", true).await?;
@@ -366,7 +366,25 @@ impl Connection {
             .map(|p| (p.path.into_string(), p.value))
             .collect();
 
-        if let Err(e) = scene.emit(pairs) {
+        // LSDP/1.1 §4.2 + §3.2.3 — when the input carries a
+        // `client_msg_id`, echo it verbatim into the resulting delta's
+        // `cause.input_id` so optimistic-UI clients can correlate the
+        // echo with their predicted state. Subject convention is
+        // `<role>:<subject>` (subject from token claims when set, else
+        // the role itself).
+        let cause = input.client_msg_id.as_ref().map(|msg_id| {
+            let subject = if identity.subject.is_empty() {
+                identity.role.to_string()
+            } else {
+                identity.subject.clone()
+            };
+            lumencast_protocol::types::Cause {
+                source: format!("{}:{}", identity.role, subject),
+                input_id: Some(msg_id.clone()),
+            }
+        });
+
+        if let Err(e) = scene.emit_with_cause(pairs, cause) {
             self.send_error(ErrorCode::Internal, e.to_string(), true)
                 .await?;
         }
@@ -398,13 +416,17 @@ impl Connection {
         self.send(&frame).await
     }
 
-    async fn send_delta(&mut self, patches: &[Patch]) -> Result<(), HandlerError> {
+    async fn send_delta(
+        &mut self,
+        patches: &[Patch],
+        cause: Option<lumencast_protocol::types::Cause>,
+    ) -> Result<(), HandlerError> {
         let seq = self.seq.next();
         let frame = ServerFrame::Delta(Delta {
             seq,
             patches: patches.to_vec(),
             ts: None,
-            cause: None,
+            cause,
         });
         self.send(&frame).await
     }
