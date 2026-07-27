@@ -127,10 +127,10 @@ fn validate_client(frame: ClientFrame) -> Result<ClientFrame, LumencastError> {
 fn validate_patches(patches: &[crate::types::Patch]) -> Result<(), LumencastError> {
     for p in patches {
         if !p.is_value_legal() {
-            return Err(LumencastError::invalid_value(format!(
-                "patch at {}: value MUST NOT be a JSON object",
-                p.path
-            )));
+            return Err(LumencastError::invalid_value_at(
+                p.path.as_str(),
+                format!("patch at {}: value MUST NOT be a JSON object", p.path),
+            ));
         }
     }
     Ok(())

@@ -130,6 +130,12 @@ pub enum LumencastError {
         code: ErrorCode,
         /// Human-readable description.
         message: String,
+        /// Offending leaf path, when the rejection is attributable to
+        /// one. LSDP/1 §3.4.1 makes `path` REQUIRED on the emitted
+        /// `INVALID_VALUE` error frame, so the rejection site — the only
+        /// place that knows which patch failed — carries it structurally
+        /// instead of only interpolating it into `message`.
+        path: Option<String>,
     },
 }
 
@@ -139,6 +145,17 @@ impl LumencastError {
         Self::InvalidValue {
             code: ErrorCode::InvalidValue,
             message: message.into(),
+            path: None,
+        }
+    }
+
+    /// Build an `InvalidValue` variant that names the offending leaf
+    /// path (LSDP/1 §3.4.1).
+    pub fn invalid_value_at(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::InvalidValue {
+            code: ErrorCode::InvalidValue,
+            message: message.into(),
+            path: Some(path.into()),
         }
     }
 }

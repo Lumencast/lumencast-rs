@@ -292,8 +292,12 @@ impl Connection {
     ) -> Result<Action, HandlerError> {
         let frame = match codec::decode_client_str(text) {
             Ok(f) => f,
-            Err(LumencastError::InvalidValue { message, .. }) => {
-                self.send_error(ErrorCode::InvalidValue, message, true)
+            Err(LumencastError::InvalidValue { message, path, .. }) => {
+                // LSDP/1 §3.4.1 — `path` is REQUIRED on INVALID_VALUE.
+                // A patch rejected at decode time (e.g. an object value)
+                // never reaches `handle_input`, so the decoder's path is
+                // the only one available here.
+                self.send_error_with_path(ErrorCode::InvalidValue, message, true, path)
                     .await?;
                 return Ok(Action::Continue);
             }
@@ -346,8 +350,17 @@ impl Connection {
         identity: &Identity,
     ) -> Result<(), HandlerError> {
         if !identity.role.can_input() {
-            self.send_error(ErrorCode::WriteForbidden, "role cannot send input", true)
-                .await?;
+            // LSDP/1 §3.4.1 — `path` is REQUIRED on WRITE_FORBIDDEN.
+            // This role-level gate fires ahead of the per-patch loop, so
+            // it names the first patch the connection tried to write.
+            let path = input.patches.first().map(|p| p.path.as_str().to_string());
+            self.send_error_with_path(
+                ErrorCode::WriteForbidden,
+                "role cannot send input",
+                true,
+                path,
+            )
+            .await?;
             return Ok(());
         }
         if input.patches.is_empty() {
