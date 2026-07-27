@@ -229,6 +229,7 @@ impl LumencastError {
         LumencastError::InvalidValue {
             code: ErrorCode::InvalidValue,
             message: format!("invalid leaf path: {}", msg.into()),
+            path: None,
         }
     }
 }

@@ -246,7 +246,62 @@ async fn viewer_input_is_rejected() {
     match recv_server(&mut ws).await {
         ServerFrame::Error(e) => {
             assert_eq!(e.code, ErrorCode::WriteForbidden);
+            // LSDP/1 §3.4.1 — `path` is REQUIRED on WRITE_FORBIDDEN.
+            assert_eq!(e.path.as_deref(), Some("__inputs.title"));
             assert!(e.recoverable, "WRITE_FORBIDDEN is recoverable");
+        }
+        other => panic!("expected error frame, got {other:?}"),
+    }
+
+    drop(ws);
+    let _ = stop_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
+}
+
+/// LSDP/1 §3.2.1 forbids JSON objects as patch values, and §3.4.1 makes
+/// `path` REQUIRED on the resulting `INVALID_VALUE`. Such a patch is
+/// caught by the decoder, never reaching the input handler — the frame
+/// is sent as raw text because the encoder would refuse to build it.
+#[tokio::test]
+async fn object_value_rejected_with_path() {
+    let (srv, addr, _auth) = start_server().await;
+    let _scene = srv.new_scene("main").unwrap();
+
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        srv.run_with_shutdown(async {
+            let _ = stop_rx.await;
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut ws = connect(addr).await;
+    send_client(
+        &mut ws,
+        &ClientFrame::Subscribe(Subscribe {
+            token: Token::from("op"),
+            scene: None,
+            session: None,
+            since_sequence: None,
+        }),
+    )
+    .await;
+    let _ = recv_server(&mut ws).await; // snapshot
+
+    let raw = json!({
+        "v": 1,
+        "type": "input",
+        "patches": [{ "path": "__inputs.title", "value": { "r": 255 } }],
+    })
+    .to_string();
+    ws.send(Message::Text(raw)).await.expect("send");
+
+    match recv_server(&mut ws).await {
+        ServerFrame::Error(e) => {
+            assert_eq!(e.code, ErrorCode::InvalidValue);
+            assert_eq!(e.path.as_deref(), Some("__inputs.title"));
+            assert!(e.recoverable, "INVALID_VALUE is recoverable");
         }
         other => panic!("expected error frame, got {other:?}"),
     }
