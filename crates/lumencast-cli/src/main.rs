@@ -10,10 +10,14 @@
 //!
 //! - `lumencast conformance --server <ws-url> [--control-url <http-url>]
 //!   [--scenarios <dir>] [--scenario <name>]` runs the scenario player
-//!   against an external server and exits 0 on full pass.
+//!   against an external server and exits 0 on full pass. Without
+//!   `--scenarios`, the suite is discovered from
+//!   `$LUMENCAST_PROTOCOL_REPO/conformance/v1/scenarios` or a
+//!   conventional relative layout; a run that executes zero scenarios
+//!   exits non-zero rather than reporting a vacuous success.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -78,8 +82,9 @@ struct ConformanceArgs {
     #[arg(long)]
     control_url: Option<String>,
 
-    /// Optional scenario directory. When omitted, the harness has no
-    /// scenarios and reports `0 / 0 passed` (useful as a smoke test).
+    /// Scenario directory. When omitted, it is discovered from
+    /// `$LUMENCAST_PROTOCOL_REPO/conformance/v1/scenarios`, then from
+    /// conventional relative layouts (see `scenario_dir_candidates`).
     #[arg(long)]
     scenarios: Option<PathBuf>,
 
@@ -167,10 +172,9 @@ async fn run_conformance(args: ConformanceArgs) -> Result<bool, Box<dyn std::err
         .ok_or("--control-url is required for v0.1 (the harness needs the test control plane)")?;
 
     let tokens = load_tokens(args.tokens.as_deref())?;
-    let scenarios = match args.scenarios.as_deref() {
-        Some(dir) => ScenariosSource::Directory(dir.to_path_buf()),
-        None => ScenariosSource::Empty,
-    };
+    let dir = resolve_scenarios_dir(args.scenarios.as_deref())?;
+    tracing::info!(dir = %dir.display(), "using scenario directory");
+    let scenarios = ScenariosSource::Directory(dir);
 
     let mut tags: Vec<Tag> = args.tag.iter().copied().map(Tag::from).collect();
     if tags.is_empty() {
@@ -190,7 +194,98 @@ async fn run_conformance(args: ConformanceArgs) -> Result<bool, Box<dyn std::err
 
     let report = lumencast_conformance::harness::run(config).await?;
     print_report(&report);
+    if report.total == 0 {
+        // A run with zero scenarios used to exit 0 (`all_passed()` on an
+        // empty report is vacuously true), which made every interop
+        // matrix cell report PASS without executing anything. An empty
+        // run is a configuration failure, never a success.
+        return Err("no scenario executed — refusing to report success".into());
+    }
     Ok(report.all_passed())
+}
+
+/// Relative path, below a protocol-repo root, of the scenario suite.
+const SCENARIOS_REL: [&str; 3] = ["conformance", "v1", "scenarios"];
+
+/// Locate the conformance scenario directory, mirroring the js CLI
+/// (`packages/protocol/src/cli.ts::resolveScenariosDir`): explicit flag,
+/// then `LUMENCAST_PROTOCOL_REPO`, then conventional relative layouts.
+///
+/// An explicit flag or env var is honoured as-is — a wrong value must
+/// surface as an error, not silently fall back to a heuristic.
+fn resolve_scenarios_dir(flag: Option<&Path>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(dir) = flag {
+        if !dir.is_dir() {
+            return Err(format!("--scenarios {} is not a directory", dir.display()).into());
+        }
+        return Ok(dir.to_path_buf());
+    }
+
+    if let Some(repo) = std::env::var_os("LUMENCAST_PROTOCOL_REPO") {
+        let dir = SCENARIOS_REL
+            .iter()
+            .fold(PathBuf::from(repo), |acc, part| acc.join(part));
+        if !dir.is_dir() {
+            return Err(format!(
+                "LUMENCAST_PROTOCOL_REPO is set but {} is not a directory",
+                dir.display()
+            )
+            .into());
+        }
+        return Ok(dir);
+    }
+
+    let cwd = std::env::current_dir().ok();
+    let exe = std::env::current_exe().ok();
+    let candidates = scenario_dir_candidates(cwd.as_deref(), exe.as_deref().and_then(Path::parent));
+    for candidate in &candidates {
+        if candidate.is_dir() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    Err(format!(
+        "no scenario directory found — pass --scenarios, set LUMENCAST_PROTOCOL_REPO, \
+         or run from a conventional layout (tried: {})",
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .into())
+}
+
+/// Conventional locations of `conformance/v1/scenarios`, relative to the
+/// working directory and to the binary (the interop driver launches
+/// `target/release/lumencast` from an arbitrary cwd, so the binary's own
+/// ancestors are the reliable anchor for a sibling checkout).
+fn scenario_dir_candidates(cwd: Option<&Path>, exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(cwd) = cwd {
+        bases.extend(cwd.ancestors().take(4).map(Path::to_path_buf));
+    }
+    if let Some(exe_dir) = exe_dir {
+        bases.extend(exe_dir.ancestors().take(6).map(Path::to_path_buf));
+    }
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    for base in bases {
+        // Inside a lumencast-protocol checkout…
+        let direct = SCENARIOS_REL
+            .iter()
+            .fold(base.clone(), |acc, p| acc.join(p));
+        // …or next to one (sibling SDK checkouts).
+        let sibling = SCENARIOS_REL
+            .iter()
+            .fold(base.join("lumencast-protocol"), |acc, p| acc.join(p));
+        for candidate in [direct, sibling] {
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
 }
 
 fn print_report(report: &lumencast_conformance::Report) {
@@ -240,4 +335,61 @@ fn default_tokens() -> BTreeMap<String, String> {
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scenarios_under(root: &Path) -> PathBuf {
+        SCENARIOS_REL
+            .iter()
+            .fold(root.to_path_buf(), |a, p| a.join(p))
+    }
+
+    #[test]
+    fn explicit_flag_must_exist() {
+        let missing = std::env::temp_dir().join("lumencast-no-such-scenarios-dir");
+        let err = resolve_scenarios_dir(Some(&missing))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a directory"), "{err}");
+    }
+
+    #[test]
+    fn candidates_cover_protocol_checkout_and_sibling() {
+        let cwd = Path::new("/w/lumencast-protocol/interop");
+        let exe_dir = Path::new("/w/lumencast-rs/target/release");
+        let candidates = scenario_dir_candidates(Some(cwd), Some(exe_dir));
+
+        // cwd is inside the protocol checkout → parent hit.
+        assert!(candidates.contains(&scenarios_under(Path::new("/w/lumencast-protocol"))));
+        // binary lives in a sibling SDK checkout → sibling hit.
+        assert!(candidates.contains(&scenarios_under(
+            &Path::new("/w").join("lumencast-protocol")
+        )));
+        // no duplicates — the two anchors overlap.
+        let mut deduped = candidates.clone();
+        deduped.dedup();
+        assert_eq!(deduped.len(), candidates.len());
+    }
+
+    #[test]
+    fn candidates_tolerate_missing_anchors() {
+        assert!(scenario_dir_candidates(None, None).is_empty());
+    }
+
+    #[test]
+    fn empty_report_is_not_a_pass() {
+        // Guards the regression this discovery fix exists for: an empty
+        // report is vacuously `all_passed()`, so the CLI must not rely on
+        // it alone to decide its exit code.
+        let empty = lumencast_conformance::Report {
+            total: 0,
+            passed: 0,
+            skipped: 0,
+            outcomes: Vec::new(),
+        };
+        assert!(empty.all_passed());
+    }
 }
