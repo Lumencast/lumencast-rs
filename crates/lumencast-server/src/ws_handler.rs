@@ -12,11 +12,12 @@
 //! 5. Validates incoming `input` frames against role+path policy,
 //!    rate-limits, and applies them to the scene.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use lumencast_protocol::frames::{
@@ -77,7 +78,14 @@ fn has_lsdp_subprotocol(headers: &HeaderMap) -> bool {
 
 async fn handle(socket: WebSocket, inner: Arc<ServerInner>) -> Result<(), HandlerError> {
     let mut conn = Connection::new(socket, inner);
-    conn.run().await
+    let outcome = conn.run().await;
+    // Every exit path leaves the wire with a proper closing handshake.
+    // Dropping the socket instead makes the peer observe 1006 (abnormal
+    // closure), which is indistinguishable from a crash — LSDP/1.1 §4.4
+    // requires a clean close after `unsubscribe`. Mirrors the Go server
+    // (`server/ws_handler.go:144`).
+    conn.close_normal().await;
+    outcome
 }
 
 /// Outcome of a single client frame.
@@ -322,9 +330,9 @@ impl Connection {
                 self.handle_input(input, scene, identity).await?;
             }
             ClientFrame::Unsubscribe(_) => {
-                // LSDP/1.1 §4.4 — clean teardown. The caller closes the WS
-                // immediately on Action::Stop ; no error frame is sent and
-                // no data flows after this point.
+                // LSDP/1.1 §4.4 — clean teardown. Action::Stop unwinds to
+                // `handle`, which sends the 1000/Normal close frame ; no
+                // error frame is sent and no data flows after this point.
                 return Ok(Action::Stop);
             }
         }
@@ -500,6 +508,19 @@ impl Connection {
             ts: Some(now_iso()),
         });
         self.send(&frame).await
+    }
+
+    /// Best-effort closing handshake with code 1000 (Normal Closure).
+    /// Failures are ignored: the peer may already be gone, and the
+    /// connection is being torn down either way.
+    async fn close_normal(&mut self) {
+        let _ = self
+            .socket
+            .send(Message::Close(Some(CloseFrame {
+                code: close_code::NORMAL,
+                reason: Cow::Borrowed(""),
+            })))
+            .await;
     }
 
     async fn send(&mut self, frame: &ServerFrame) -> Result<(), HandlerError> {
