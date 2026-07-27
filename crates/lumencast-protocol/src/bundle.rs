@@ -216,6 +216,103 @@ const PRIMITIVE_KINDS: &[&str] = &[
     "stack", "grid", "frame", "text", "image", "shape", "media", "repeat",
 ];
 
+/// Zab vendor capture placeholder (RFC-0001) — the one vendor-prefixed
+/// `kind` this crate recognises.
+pub const ZAB_CAPTURE_KIND: &str = "x-zab.capture";
+
+/// `x-zab.sourceKind` values whose box is painted. `size` is mandatory
+/// for them: the geometry is what lets the consuming app position the
+/// native source over the box the author drew (RFC-0001 Amendment 2
+/// §A2.2/§A2.4).
+const CAPTURE_VISUAL_KINDS: &[&str] = &[
+    "media.webcam",
+    "media.screen",
+    "media.window",
+    "media.file",
+    "media.game",
+];
+
+/// Audio-only `x-zab.sourceKind` values — a zero-area inert box is
+/// valid, so `size` MAY be omitted (RFC-0001 Amendment 2 §A2.2).
+const CAPTURE_AUDIO_KINDS: &[&str] = &["media.app_audio", "media.system_audio", "media.mic"];
+
+/// Validate every `x-zab.capture` node reachable from `root` against
+/// RFC-0001 (+ Amendment 2), leaving every other node untouched.
+///
+/// Deliberately narrower than [`Bundle::validate`]: a caller holding an
+/// untrusted inline layout can enforce the vendor contract without also
+/// taking a position on core primitives it may not know yet.
+pub fn check_zab_capture_nodes(root: &Value) -> Result<(), BundleError> {
+    let mut stack: Vec<&Value> = vec![root];
+    while let Some(node) = stack.pop() {
+        let Some(obj) = node.as_object() else {
+            continue;
+        };
+        if obj.get("kind").and_then(Value::as_str) == Some(ZAB_CAPTURE_KIND) {
+            check_zab_capture(obj)?;
+        }
+        if let Some(children) = obj.get("children").and_then(Value::as_array) {
+            stack.extend(children.iter());
+        }
+        if let Some(template) = obj.get("template") {
+            stack.push(template);
+        }
+    }
+    Ok(())
+}
+
+/// RFC-0001 prop rules for a single `x-zab.capture` node.
+fn check_zab_capture(obj: &serde_json::Map<String, Value>) -> Result<(), BundleError> {
+    let Some(source_kind) = obj.get("x-zab.sourceKind").and_then(Value::as_str) else {
+        return Err(BundleError::Invalid(
+            "`x-zab.capture` MUST declare `x-zab.sourceKind` (RFC-0001)".into(),
+        ));
+    };
+    let visual = CAPTURE_VISUAL_KINDS.contains(&source_kind);
+    if !visual && !CAPTURE_AUDIO_KINDS.contains(&source_kind) {
+        return Err(BundleError::Invalid(format!(
+            "unknown `x-zab.sourceKind` {source_kind:?} (RFC-0001 A2 §A2.2: {}, {})",
+            CAPTURE_VISUAL_KINDS.join(", "),
+            CAPTURE_AUDIO_KINDS.join(", "),
+        )));
+    }
+
+    let Some(device_ref) = obj.get("x-zab.deviceRef").and_then(Value::as_str) else {
+        return Err(BundleError::Invalid(
+            "`x-zab.capture` MUST declare `x-zab.deviceRef` (RFC-0001)".into(),
+        ));
+    };
+    if !is_logical_device_ref(device_ref) {
+        return Err(BundleError::Invalid(format!(
+            "`x-zab.deviceRef` {device_ref:?} MUST be a logical alias matching \
+             ^[a-z][a-z0-9-]{{0,63}}$ — never a physical device id (RFC-0001)"
+        )));
+    }
+
+    // §A2.4 — the visual set is a SECOND set, not a subset check on the
+    // enum: extending the enum alone would let a `media.file` with no
+    // geometry through as a zero-area media box.
+    if visual && !obj.contains_key("size") {
+        return Err(BundleError::Invalid(format!(
+            "`x-zab.capture` of visual kind {source_kind:?} MUST declare `size` \
+             (RFC-0001 Amendment 2 §A2.2)"
+        )));
+    }
+    Ok(())
+}
+
+/// `^[a-z][a-z0-9-]{0,63}$` — the hash-safe logical alias grammar.
+fn is_logical_device_ref(s: &str) -> bool {
+    if s.len() > 64 {
+        return false;
+    }
+    let mut chars = s.chars();
+    if !matches!(chars.next(), Some(c) if c.is_ascii_lowercase()) {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Walk the layout subtree iteratively (children + repeat templates)
 /// and check the LSML 1.0 invariants on each node.
 fn check_layout_invariants(root: &Value) -> Result<(), BundleError> {
@@ -231,7 +328,11 @@ fn check_layout_invariants(root: &Value) -> Result<(), BundleError> {
                 "primitive node MUST declare a `kind` field".into(),
             ));
         };
-        if !PRIMITIVE_KINDS.contains(&kind) {
+        if kind == ZAB_CAPTURE_KIND {
+            // Recognised vendor primitive (RFC-0001): validated by its
+            // own prop rules, not by the core catalogue.
+            check_zab_capture(obj)?;
+        } else if !PRIMITIVE_KINDS.contains(&kind) {
             return Err(BundleError::Invalid(format!(
                 "unknown primitive kind {kind:?} (LSML 1.0 catalogue: {})",
                 PRIMITIVE_KINDS.join(", ")
@@ -626,6 +727,97 @@ mod tests {
         }))
         .unwrap();
         Bundle::parse_str(&s).expect("must accept full catalogue");
+    }
+
+    fn capture_layout(node: Value) -> Value {
+        json!({
+            "kind": "frame",
+            "size": { "w": 1920, "h": 1080 },
+            "children": [node]
+        })
+    }
+
+    #[test]
+    fn rejects_capture_with_physical_device_id() {
+        let err = check_zab_capture_nodes(&capture_layout(json!({
+            "kind": ZAB_CAPTURE_KIND,
+            "x-zab.sourceKind": "media.webcam",
+            "x-zab.deviceRef": "video:0",
+            "size": { "w": 640, "h": 360 }
+        })))
+        .unwrap_err();
+        assert!(format!("{err}").contains("x-zab.deviceRef"), "{err}");
+    }
+
+    #[test]
+    fn rejects_visual_capture_without_size() {
+        for kind in ["media.file", "media.game", "media.webcam"] {
+            let err = check_zab_capture_nodes(&capture_layout(json!({
+                "kind": ZAB_CAPTURE_KIND,
+                "x-zab.sourceKind": kind,
+                "x-zab.deviceRef": "intro-sting"
+            })))
+            .unwrap_err();
+            assert!(format!("{err}").contains("`size`"), "{kind}: {err}");
+        }
+    }
+
+    #[test]
+    fn accepts_audio_capture_without_size() {
+        for kind in ["media.mic", "media.system_audio", "media.app_audio"] {
+            check_zab_capture_nodes(&capture_layout(json!({
+                "kind": ZAB_CAPTURE_KIND,
+                "x-zab.sourceKind": kind,
+                "x-zab.deviceRef": "main-mic"
+            })))
+            .unwrap_or_else(|e| panic!("{kind} must be accepted: {e}"));
+        }
+    }
+
+    #[test]
+    fn rejects_capture_with_unknown_source_kind() {
+        let err = check_zab_capture_nodes(&capture_layout(json!({
+            "kind": ZAB_CAPTURE_KIND,
+            "x-zab.sourceKind": "media.hologram",
+            "x-zab.deviceRef": "primary-cam",
+            "size": { "w": 1, "h": 1 }
+        })))
+        .unwrap_err();
+        assert!(format!("{err}").contains("x-zab.sourceKind"), "{err}");
+    }
+
+    #[test]
+    fn accepts_valid_capture_and_ignores_other_kinds() {
+        // A layout the core catalogue would reject (`carousel`) is left
+        // alone: this walk only speaks for `x-zab.capture`.
+        check_zab_capture_nodes(&capture_layout(json!({
+            "kind": "carousel",
+            "children": [{
+                "kind": ZAB_CAPTURE_KIND,
+                "x-zab.sourceKind": "media.webcam",
+                "x-zab.deviceRef": "primary-cam",
+                "size": { "w": 640, "h": 360 }
+            }]
+        })))
+        .expect("valid capture nested under an unknown kind must pass");
+    }
+
+    #[test]
+    fn bundle_validate_covers_capture_nodes() {
+        let s = serde_json::to_string(&json!({
+            "lsml": "1.1",
+            "scene_id": "capture-bad-ref",
+            "scene_version": placeholder_hash(),
+            "layout": capture_layout(json!({
+                "kind": ZAB_CAPTURE_KIND,
+                "x-zab.sourceKind": "media.webcam",
+                "x-zab.deviceRef": "video:0",
+                "size": { "w": 640, "h": 360 }
+            }))
+        }))
+        .unwrap();
+        let err = Bundle::parse_str(&s).unwrap_err();
+        assert!(format!("{err}").contains("x-zab.deviceRef"), "{err}");
     }
 
     #[test]

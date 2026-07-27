@@ -63,6 +63,11 @@ pub(crate) struct SceneInner {
     /// path not in the map yields `UNKNOWN_PATH`, any value violating
     /// the spec's constraints yields `INVALID_VALUE`.
     declared_inputs: RwLock<Option<HashMap<String, InputSpec>>>,
+    /// Set when the bundle backing this scene failed validation. A
+    /// subscriber then receives this `error` frame instead of a
+    /// snapshot — serving state for a bundle the server refused would
+    /// hide the authoring fault behind a scene that looks healthy.
+    rejection: RwLock<Option<SceneRejection>>,
 }
 
 impl Scene {
@@ -80,6 +85,7 @@ impl Scene {
                 )),
                 bundle_bytes: RwLock::new(None),
                 declared_inputs: RwLock::new(None),
+                rejection: RwLock::new(None),
             }),
         }
     }
@@ -109,6 +115,22 @@ impl Scene {
     #[must_use]
     pub fn bundle_bytes(&self) -> Option<Arc<Vec<u8>>> {
         self.inner.bundle_bytes.read().clone()
+    }
+
+    /// Mark this scene unservable: every subscriber gets `code` /
+    /// `message` as a non-recoverable `error` frame in place of the
+    /// snapshot. Used when the backing bundle fails validation.
+    pub fn reject(&self, code: ErrorCode, message: impl Into<String>) {
+        *self.inner.rejection.write() = Some(SceneRejection {
+            code,
+            message: message.into(),
+        });
+    }
+
+    /// The rejection recorded by [`Scene::reject`], if any.
+    #[must_use]
+    pub fn rejection(&self) -> Option<SceneRejection> {
+        self.inner.rejection.read().clone()
     }
 
     /// Stable scene identifier.
@@ -296,6 +318,15 @@ impl Scene {
         }
         Ok(())
     }
+}
+
+/// Why a scene refuses to serve a snapshot (see [`Scene::reject`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneRejection {
+    /// LSDP/1 error code carried by the `error` frame.
+    pub code: ErrorCode,
+    /// Human-readable reason, echoed as the frame's `message`.
+    pub message: String,
 }
 
 /// Reason a patch was rejected by [`Scene::check_input_patch`].

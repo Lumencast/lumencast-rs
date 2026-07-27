@@ -64,7 +64,7 @@ pub use config::ServerConfig;
 pub use error::ServerError;
 pub use input::{InputSpec, InputType, check_constraint};
 pub use role::Role;
-pub use scene::{InputRejection, Scene};
+pub use scene::{InputRejection, Scene, SceneRejection};
 pub use server::{Server, ServerBuilder, ServerHandle};
 
 #[cfg(feature = "tls")]

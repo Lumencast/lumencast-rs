@@ -143,6 +143,16 @@ impl Connection {
         };
         self.current_scene = Some(scene.clone());
 
+        // 3 bis. A scene whose bundle failed validation never ships a
+        //        snapshot: the subscriber gets the rejection instead.
+        //        Emitting state here would let an invalid bundle look
+        //        like a healthy scene (RFC-0001, LSML §17.1.2).
+        if let Some(rejection) = scene.rejection() {
+            self.send_error(rejection.code, rejection.message, false)
+                .await?;
+            return Ok(());
+        }
+
         // 4. Subscribe before snapshot so the broadcast cannot drop
         //    deltas that fire while we serialize the snapshot.
         let mut deltas_rx = scene.subscribe();
