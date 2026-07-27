@@ -100,10 +100,11 @@ where
 struct SetupBundle {
     id: String,
     hash: String,
-    /// Inline bundle JSON. Accepted but currently ignored — we pin
-    /// the declared `hash` per CONTROL.md without recomputing.
+    /// Inline bundle JSON. The declared `hash` is pinned as-is per
+    /// CONTROL.md (never recomputed) ; the body is read for
+    /// `scene_id`, `operator_inputs`, `defaults`, and validated for
+    /// `x-zab.capture` nodes.
     #[serde(default)]
-    #[allow(dead_code)]
     inline: Option<Value>,
 }
 
@@ -164,6 +165,21 @@ async fn handle_setup(
             );
         }
     };
+
+    // Vendor-primitive validation (RFC-0001). A bundle carrying a
+    // malformed `x-zab.capture` is registered but marked unservable, so
+    // the subscriber gets an `error` frame where it would otherwise
+    // read a snapshot of a scene built from a bundle we rejected.
+    // Scoped to capture nodes on purpose: the scenario suite feeds
+    // inline bodies from several LSML minors, and a full `Bundle`
+    // validation here would reject primitives this crate simply has not
+    // caught up with yet.
+    if let Some(layout) = inline.and_then(|v| v.get("layout"))
+        && let Err(e) = lumencast_protocol::bundle::check_zab_capture_nodes(layout)
+    {
+        tracing::warn!(scene_id = %effective_id, error = %e, "bundle rejected at setup");
+        scene.reject(lumencast_protocol::ErrorCode::InvalidValue, e.to_string());
+    }
 
     // Operator-input declarations: extract from `inline.operator_inputs`
     // and attach to the scene. Mirrors Go's `extractInputSpecs`.
